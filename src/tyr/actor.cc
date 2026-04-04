@@ -10,6 +10,10 @@
 
 #include <sstream>
 
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+
 using namespace valhalla;
 using namespace valhalla::loki;
 using namespace valhalla::midgard;
@@ -231,9 +235,6 @@ std::string actor_t::trace_route(const std::string& request_str,
   return bytes;
 }
 
-#include <rapidjson/document.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
 
 std::string actor_t::trace_attributes(const std::string& request_str,
                                       const std::function<void()>* interrupt,
