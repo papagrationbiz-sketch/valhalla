@@ -1303,6 +1303,9 @@ TripLeg_Edge* AddTripEdge(const AttributesController& controller,
   if (controller(kEdgeTrafficSignal)) {
     trip_edge->set_traffic_signal(directededge->traffic_signal());
   }
+  if (controller(kEdgeStopSignFwd)) {
+    trip_edge->set_stop_sign(directededge->stop_sign());
+  }
 
   // Set hov type if requested
   if (controller(kEdgeHovType)) {

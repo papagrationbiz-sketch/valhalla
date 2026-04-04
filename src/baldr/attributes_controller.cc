@@ -112,6 +112,8 @@ const std::unordered_map<std::string_view, bool> AttributesController::kDefaultA
     {kEdgeForward, true},
     {kEdgeLevels, true},
     {kEdgeTrafficSignal, true},
+    {kEdgeStopSignFwd, true},
+    {kEdgeStopSignBwd, true},
     {kEdgeHovType, true},
 
     // Node keys
@@ -130,6 +132,7 @@ const std::unordered_map<std::string_view, bool> AttributesController::kDefaultA
     {kNodeAdminIndex, true},
     {kNodeType, true},
     {kNodeTrafficSignal, true},
+    {kNodeStopSignFwd, true},
     {kNodeFork, true},
     {kNodeTransitPlatformInfoType, true},
     {kNodeTransitPlatformInfoOnestopId, true},

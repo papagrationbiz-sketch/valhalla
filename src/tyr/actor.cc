@@ -231,6 +231,10 @@ std::string actor_t::trace_route(const std::string& request_str,
   return bytes;
 }
 
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+
 std::string actor_t::trace_attributes(const std::string& request_str,
                                       const std::function<void()>* interrupt,
                                       Api* api) {
@@ -245,8 +249,24 @@ std::string actor_t::trace_attributes(const std::string& request_str,
   if (!api) {
     api = &dummy;
   }
+  // Workaround: The request might contain an "action" field which confuses the parser,
+  // making it think this is an expansion action. We remove it here before parsing.
+  rapidjson::Document doc;
+  doc.Parse(request_str.c_str());
+  if (doc.HasParseError()) {
+    // Or handle the error appropriately
+    throw valhalla_exception_t{100};
+  }
+  if (doc.HasMember("action")) {
+    doc.RemoveMember("action");
+  }
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+  std::string modified_request_str = buffer.GetString();
+
   // parse the request
-  ParseApi(request_str, Options::trace_attributes, *api);
+  ParseApi(modified_request_str, Options::trace_attributes, *api);
   // check the request and locate the locations in the graph
   pimpl->loki_worker.trace(*api);
   // get the path and turn it into attribution along it

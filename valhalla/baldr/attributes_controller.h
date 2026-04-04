@@ -86,6 +86,8 @@ constexpr std::string_view kEdgeCountryCrossing = "edge.country_crossing";
 constexpr std::string_view kEdgeForward = "edge.forward";
 constexpr std::string_view kEdgeLevels = "edge.levels";
 constexpr std::string_view kEdgeTrafficSignal = "edge.traffic_signal";
+constexpr std::string_view kEdgeStopSignFwd = "edge.stop_sign_forward";
+constexpr std::string_view kEdgeStopSignBwd = "edge.stop_sign_backward";
 constexpr std::string_view kEdgeHovType = "edge.hov_type";
 
 // Node keys
@@ -105,6 +107,7 @@ constexpr std::string_view kNodeElapsedTime = "node.elapsed_time";
 constexpr std::string_view kNodeAdminIndex = "node.admin_index";
 constexpr std::string_view kNodeType = "node.type";
 constexpr std::string_view kNodeTrafficSignal = "node.traffic_signal";
+constexpr std::string_view kNodeStopSignFwd = "node.stop_sign_forward";
 constexpr std::string_view kNodeFork = "node.fork";
 constexpr std::string_view kNodeTransitPlatformInfoType = "node.transit_platform_info.type";
 constexpr std::string_view kNodeTransitPlatformInfoOnestopId =
