@@ -108,6 +108,7 @@ constexpr std::string_view kNodeAdminIndex = "node.admin_index";
 constexpr std::string_view kNodeType = "node.type";
 constexpr std::string_view kNodeTrafficSignal = "node.traffic_signal";
 constexpr std::string_view kNodeStopSignFwd = "node.stop_sign_forward";
+constexpr std::string_view kNodeIntersectingEdgeName = "node.intersecting_edge.name";
 constexpr std::string_view kNodeFork = "node.fork";
 constexpr std::string_view kNodeTransitPlatformInfoType = "node.transit_platform_info.type";
 constexpr std::string_view kNodeTransitPlatformInfoOnestopId =

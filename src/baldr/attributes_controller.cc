@@ -133,6 +133,7 @@ const std::unordered_map<std::string_view, bool> AttributesController::kDefaultA
     {kNodeType, true},
     {kNodeTrafficSignal, true},
     {kNodeStopSignFwd, true},
+    {kNodeIntersectingEdgeName, true},
     {kNodeFork, true},
     {kNodeTransitPlatformInfoType, true},
     {kNodeTransitPlatformInfoOnestopId, true},

@@ -365,6 +365,13 @@ void serialize_edges(const AttributesController& controller,
             if (controller(kNodeIntersectingEdgeRoadClass)) {
               writer("road_class", to_string(static_cast<baldr::RoadClass>(xedge.road_class())));
             }
+            if (controller(kNodeIntersectingEdgeName) && xedge.name_size() > 0) {
+              writer.start_array("names");
+              for (const auto& name : xedge.name()) {
+                writer(name.value());
+              }
+              writer.end_array();
+            }
             writer.end_object();
           }
           writer.end_array();

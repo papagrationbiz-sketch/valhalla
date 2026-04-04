@@ -867,7 +867,7 @@ void AddTripIntersectingEdge(const AttributesController& controller,
   }
 
   // Add names to edge if requested
-  if (controller(kEdgeNames)) {
+  if (controller(kEdgeNames) || controller(kNodeIntersectingEdgeName)) {
 
     auto edgeinfo = graphtile->edgeinfo(intersecting_de);
     auto names_and_types = edgeinfo.GetNamesAndTypes(true);
@@ -1097,7 +1097,7 @@ TripLeg_Edge* AddTripEdge(const AttributesController& controller,
   // Get the edgeinfo
 
   // Add names to edge if requested
-  if (controller(kEdgeNames)) {
+  if (controller(kEdgeNames) || controller(kNodeIntersectingEdgeName)) {
     auto names_and_types = edgeinfo.GetNamesAndTypes(true);
     if (blind_instructions)
       FilterUnneededStreetNumbers(names_and_types);
