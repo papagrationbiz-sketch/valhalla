@@ -73,8 +73,77 @@ void serialize_edges(const AttributesController& controller,
   if (options.units() == Options::miles) {
     scale = kMilePerKm;
   }
-  auto serialize_speed = [scale](float speed) -> uint64_t {
+    auto serialize_speed = [scale](float speed) -> uint64_t {
     return static_cast<uint64_t>(std::round(speed * scale));
+  };
+
+  auto serialize_sign = [&](const TripSign& sign) {
+    writer.start_object("sign");
+    // Populate exit number array
+    if (controller(kEdgeSignExitNumber) && sign.exit_numbers_size() > 0) {
+      writer.start_array("exit_number");
+      for (const auto& exit_number : sign.exit_numbers()) {
+        writer(exit_number.text());
+      }
+      writer.end_array();
+    }
+    // Populate exit branch array
+    if (controller(kEdgeSignExitBranch) && sign.exit_onto_streets_size() > 0) {
+      writer.start_array("exit_branch");
+      for (const auto& exit_onto_street : sign.exit_onto_streets()) {
+        writer(exit_onto_street.text());
+      }
+      writer.end_array();
+    }
+    // Populate exit toward array
+    if (controller(kEdgeSignExitToward) && sign.exit_toward_locations_size() > 0) {
+      writer.start_array("exit_toward");
+      for (const auto& exit_toward_location : sign.exit_toward_locations()) {
+        writer(exit_toward_location.text());
+      }
+      writer.end_array();
+    }
+    // Populate exit name array
+    if (controller(kEdgeSignExitName) && sign.exit_names_size() > 0) {
+      writer.start_array("exit_name");
+      for (const auto& exit_name : sign.exit_names()) {
+        writer(exit_name.text());
+      }
+      writer.end_array();
+    }
+    // Populate guide branch array
+    if (controller(kEdgeSignGuideBranch) && sign.guide_onto_streets_size() > 0) {
+      writer.start_array("guide_branch");
+      for (const auto& guide_onto_street : sign.guide_onto_streets()) {
+        writer(guide_onto_street.text());
+      }
+      writer.end_array();
+    }
+    // Populate guide toward array
+    if (controller(kEdgeSignGuideToward) && sign.guide_toward_locations_size() > 0) {
+      writer.start_array("guide_toward");
+      for (const auto& guide_toward_location : sign.guide_toward_locations()) {
+        writer(guide_toward_location.text());
+      }
+      writer.end_array();
+    }
+    // Populate junction name array
+    if (controller(kEdgeSignJunctionName) && sign.junction_names_size() > 0) {
+      writer.start_array("junction_name");
+      for (const auto& junction_name : sign.junction_names()) {
+        writer(junction_name.text());
+      }
+      writer.end_array();
+    }
+    // Guidance View Junction
+    if (controller(kEdgeSignGuidanceViewJunction) && sign.has_guidance_view_junction()) {
+      writer("guidance_view_junction", sign.guidance_view_junction().image_id());
+    }
+    // Guidance View Signboard
+    if (controller(kEdgeSignGuidanceViewSignboard) && sign.has_guidance_view_signboard()) {
+      writer("guidance_view_signboard", sign.guidance_view_signboard().image_id());
+    }
+    writer.end_object();
   };
 
   // Loop over edges to add attributes
@@ -116,6 +185,48 @@ void serialize_edges(const AttributesController& controller,
       }
       if (controller(kEdgeLaneCount)) {
         writer("lane_count", edge.lane_count());
+      }
+      if (controller(kEdgeDefaultSpeed) && (edge.default_speed() > 0.0f)) {
+        writer("default_speed", edge.default_speed());
+      }
+      if (controller(kEdgeDestinationOnly)) {
+        writer("destination_only", edge.destination_only());
+      }
+      if (controller(kEdgeIsUrban)) {
+        writer("is_urban", edge.is_urban());
+      }
+      if (controller(kEdgeTaggedValues) && edge.tagged_value_size() > 0) {
+        writer.start_array("tagged_values");
+        for (const auto& tv : edge.tagged_value()) {
+          writer.start_object();
+          writer("value", tv.value());
+          writer("type", static_cast<uint32_t>(tv.type()));
+          writer.end_object();
+        }
+        writer.end_array();
+      }
+      if (controller(kEdgeIndoor)) {
+        writer("indoor", edge.indoor());
+      }
+      if (controller(kEdgeLandmarks) && edge.landmarks_size() > 0) {
+        writer.start_array("landmarks");
+        for (const auto& lm : edge.landmarks()) {
+          writer.start_object();
+          if (!lm.name().empty()) {
+            writer("name", lm.name());
+          }
+          writer("type", static_cast<uint32_t>(lm.type()));
+          if (lm.has_lat_lng()) {
+            writer.set_precision(tyr::kCoordinatePrecision);
+            writer("lat", lm.lat_lng().lat());
+            writer("lon", lm.lat_lng().lon());
+            writer.set_precision(tyr::kDefaultPrecision);
+          }
+          writer("distance", lm.distance());
+          writer("right", lm.right());
+          writer.end_object();
+        }
+        writer.end_array();
       }
       if (edge.lane_connectivity_size()) {
         writer.start_array("lane_connectivity");
@@ -291,46 +402,8 @@ void serialize_edges(const AttributesController& controller,
       }
 
       // Process edge sign
-      // TODO: do we want to output 'is_route_number'?
       if (edge.has_sign()) {
-        writer.start_object("sign");
-
-        // Populate exit number array
-        if (edge.sign().exit_numbers_size() > 0) {
-          writer.start_array("exit_number");
-          for (const auto& exit_number : edge.sign().exit_numbers()) {
-            writer(exit_number.text());
-          }
-          writer.end_array();
-        }
-
-        // Populate exit branch array
-        if (edge.sign().exit_onto_streets_size() > 0) {
-          writer.start_array("exit_branch");
-          for (const auto& exit_onto_street : edge.sign().exit_onto_streets()) {
-            writer(exit_onto_street.text());
-          }
-          writer.end_array();
-        }
-
-        // Populate exit toward array
-        if (edge.sign().exit_toward_locations_size() > 0) {
-          writer.start_array("exit_toward");
-          for (const auto& exit_toward_location : edge.sign().exit_toward_locations()) {
-            writer(exit_toward_location.text());
-          }
-          writer.end_array();
-        }
-
-        // Populate exit name array
-        if (edge.sign().exit_names_size() > 0) {
-          writer.start_array("exit_name");
-          for (const auto& exit_name : edge.sign().exit_names()) {
-            writer(exit_name.text());
-          }
-          writer.end_array();
-        }
-        writer.end_object();
+        serialize_sign(edge.sign());
       }
 
       // Process edge end node only if any node items are enabled
@@ -348,6 +421,12 @@ void serialize_edges(const AttributesController& controller,
             if (controller(kNodeIntersectingEdgeCyclability) &&
                 (xedge.cyclability() != TripLeg_Traversability_kNone)) {
               writer("cyclability", to_string(xedge.cyclability()));
+            }
+            if (controller(kNodeIntersectingEdgeLaneCount)) {
+              writer("lane_count", xedge.lane_count());
+            }
+            if (controller(kNodeIntersectingEdgeSignInfo) && xedge.has_sign()) {
+              serialize_sign(xedge.sign());
             }
             if (controller(kNodeIntersectingEdgeDriveability) &&
                 (xedge.driveability() != TripLeg_Traversability_kNone)) {
