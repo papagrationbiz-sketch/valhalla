@@ -136,12 +136,20 @@ void serialize_edges(const AttributesController& controller,
       writer.end_array();
     }
     // Guidance View Junction
-    if (controller(kEdgeSignGuidanceViewJunction) && sign.has_guidance_view_junction()) {
-      writer("guidance_view_junction", sign.guidance_view_junction().image_id());
+    if (controller(kEdgeSignGuidanceViewJunction) && sign.guidance_view_junctions_size() > 0) {
+      writer.start_array("guidance_view_junction");
+      for (const auto& gvj : sign.guidance_view_junctions()) {
+        writer(gvj.text());
+      }
+      writer.end_array();
     }
     // Guidance View Signboard
-    if (controller(kEdgeSignGuidanceViewSignboard) && sign.has_guidance_view_signboard()) {
-      writer("guidance_view_signboard", sign.guidance_view_signboard().image_id());
+    if (controller(kEdgeSignGuidanceViewSignboard) && sign.guidance_view_signboards_size() > 0) {
+      writer.start_array("guidance_view_signboard");
+      for (const auto& gvs : sign.guidance_view_signboards()) {
+        writer(gvs.text());
+      }
+      writer.end_array();
     }
     writer.end_object();
   };
