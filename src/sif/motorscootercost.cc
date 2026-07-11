@@ -1,12 +1,15 @@
 #include "sif/motorscootercost.h"
 #include "baldr/directededge.h"
 #include "baldr/graphconstants.h"
+#include "baldr/graphreader.h"
+#include "baldr/graphtile.h"
 #include "baldr/nodeinfo.h"
 #include "baldr/rapidjson_utils.h"
 #include "proto_conversions.h"
 #include "sif/costconstants.h"
 #include "sif/osrm_car_duration.h"
 
+#include <algorithm>
 #include <cassert>
 
 #ifdef INLINE_TEST
@@ -31,6 +34,7 @@ constexpr float kDefaultDestinationOnlyPenalty = 120.0f; // Seconds
 // Other options
 constexpr float kDefaultUseHills = 0.5f;   // Factor between 0 and 1
 constexpr float kDefaultUsePrimary = 0.5f; // Factor between 0 and 1
+constexpr float kMultiLaneRightTurnPenalty = 60.0f;
 
 constexpr uint32_t kMinimumTopSpeed = 20;  // Kilometers per hour
 constexpr uint32_t kDefaultTopSpeed = 45;  // Kilometers per hour
@@ -138,6 +142,31 @@ BaseCostingOptionsConfig GetBaseCostOptsConfig() {
 }
 
 const BaseCostingOptionsConfig kBaseCostOptsConfig = GetBaseCostOptsConfig();
+
+bool IsRightTurn(const Turn::Type turntype) {
+  return turntype == Turn::Type::kRight || turntype == Turn::Type::kSharpRight;
+}
+
+uint32_t EffectiveIngressLaneCount(const graph_tile_ptr& ingress_tile,
+                                   const DirectedEdge* ingress_edge) {
+  if (!ingress_edge || ingress_edge->internal()) {
+    return 0;
+  }
+
+  const auto edge_index =
+      static_cast<uint32_t>(std::distance(ingress_tile->directededge(0), ingress_edge));
+  const auto turn_lane_count =
+      ingress_edge->turnlanes() ? ingress_tile->turnlanes(edge_index).size() : 0;
+  return std::max<uint32_t>(ingress_edge->lanecount(), turn_lane_count);
+}
+
+bool IsPenalizedMultiLaneRightTurn(const bool enabled,
+                                   const Turn::Type turntype,
+                                   const graph_tile_ptr& ingress_tile,
+                                   const DirectedEdge* ingress_edge) {
+  return enabled && IsRightTurn(turntype) && ingress_tile &&
+         EffectiveIngressLaneCount(ingress_tile, ingress_edge) >= 2;
+}
 
 } // namespace
 
@@ -340,6 +369,7 @@ public:
   // We expose it within the source file for testing purposes
 public:
   float road_factor_; // Road factor based on use_primary
+  bool avoid_multi_lane_right_turns_;
 
   // Elevation/grade penalty (weighting applied based on the edge's weighted
   // grade (relative value from 0-15)
@@ -348,7 +378,8 @@ public:
 
 // Constructor
 MotorScooterCost::MotorScooterCost(const Costing& costing)
-    : DynamicCost(costing, TravelMode::kDrive, kMopedAccess) {
+    : DynamicCost(costing, TravelMode::kDrive, kMopedAccess),
+      avoid_multi_lane_right_turns_(costing.options().avoid_multi_lane_right_turns()) {
   const auto& costing_options = costing.options();
 
   // Get the base costs
@@ -480,7 +511,7 @@ Cost MotorScooterCost::TransitionCost(
     const baldr::NodeInfo* node,
     const EdgeLabel& pred,
     const graph_tile_ptr& /*tile*/,
-    const std::function<baldr::LimitedGraphReader()>& /*reader_getter*/) const {
+    const std::function<baldr::LimitedGraphReader()>& reader_getter) const {
   // Get the transition cost for country crossing, ferry, gate, toll booth,
   // destination only, alley, maneuver penalty
   uint32_t idx = pred.opp_local_idx();
@@ -534,6 +565,15 @@ Cost MotorScooterCost::TransitionCost(
     }
     c.cost += seconds;
   }
+  if (avoid_multi_lane_right_turns_ && IsRightTurn(turntype)) {
+    auto reader = reader_getter();
+    const auto ingress_tile = reader.GetGraphTile(pred.edgeid());
+    const auto* ingress_edge = ingress_tile ? ingress_tile->directededge(pred.edgeid()) : nullptr;
+    if (IsPenalizedMultiLaneRightTurn(true, turntype, ingress_tile, ingress_edge)) {
+      // This is a generalized search cost only; do not alter ETA.
+      c.cost += kMultiLaneRightTurnPenalty;
+    }
+  }
   return c;
 }
 
@@ -544,9 +584,9 @@ Cost MotorScooterCost::TransitionCost(
 Cost MotorScooterCost::TransitionCostReverse(
     const uint32_t idx,
     const baldr::NodeInfo* node,
-    const baldr::DirectedEdge* pred,
-    const baldr::DirectedEdge* edge,
-    const graph_tile_ptr& /*tile*/,
+    const baldr::DirectedEdge* ingress_edge,
+    const baldr::DirectedEdge* outgoing_edge,
+    const graph_tile_ptr& ingress_tile,
     const GraphId& /*pred_id*/,
     const std::function<baldr::LimitedGraphReader()>& /*reader_getter*/,
     const bool has_measured_speed,
@@ -558,25 +598,25 @@ Cost MotorScooterCost::TransitionCostReverse(
 
   // Get the transition cost for country crossing, ferry, gate, toll booth,
   // destination only, alley, maneuver penalty
-  Cost c = base_transition_cost(node, edge, pred, idx);
-  c.secs += OSRMCarTurnDuration(edge, node, pred->opp_local_idx());
+  Cost c = base_transition_cost(node, outgoing_edge, ingress_edge, idx);
+  c.secs += OSRMCarTurnDuration(outgoing_edge, node, ingress_edge->opp_local_idx());
 
-  const auto stopimpact = edge->stopimpact(idx);
-  const auto turntype = edge->turntype(idx);
+  const auto stopimpact = outgoing_edge->stopimpact(idx);
+  const auto turntype = outgoing_edge->turntype(idx);
   // Transition time = turncost * stopimpact * densityfactor
   if (stopimpact > 0 && !shortest_) {
     float turn_cost;
-    if (edge->edge_to_right(idx) && edge->edge_to_left(idx)) {
+    if (outgoing_edge->edge_to_right(idx) && outgoing_edge->edge_to_left(idx)) {
       turn_cost = kTCCrossing;
     } else {
       turn_cost = (node->drive_on_right()) ? kRightSideTurnCosts[static_cast<uint32_t>(turntype)]
                                            : kLeftSideTurnCosts[static_cast<uint32_t>(turntype)];
     }
 
-    if ((edge->use() != Use::kRamp && pred->use() == Use::kRamp) ||
-        (edge->use() == Use::kRamp && pred->use() != Use::kRamp)) {
+    if ((outgoing_edge->use() != Use::kRamp && ingress_edge->use() == Use::kRamp) ||
+        (outgoing_edge->use() == Use::kRamp && ingress_edge->use() != Use::kRamp)) {
       turn_cost += kTCRamp;
-      if (edge->roundabout())
+      if (outgoing_edge->roundabout())
         turn_cost += kTCRoundabout;
     }
 
@@ -594,8 +634,8 @@ Cost MotorScooterCost::TransitionCostReverse(
       seconds *= stopimpact;
     }
 
-    AddUturnPenalty(idx, node, edge, has_reverse, has_left, has_right, false, InternalTurn::kNoTurn,
-                    seconds);
+    AddUturnPenalty(idx, node, outgoing_edge, has_reverse, has_left, has_right, false,
+                    InternalTurn::kNoTurn, seconds);
 
     // Apply density factor and stop impact penalty if there isn't traffic on this edge or you're not
     // using traffic
@@ -605,6 +645,11 @@ Cost MotorScooterCost::TransitionCostReverse(
       seconds *= kTransDensityFactor[node->density()];
     }
     c.cost += seconds;
+  }
+  if (IsPenalizedMultiLaneRightTurn(avoid_multi_lane_right_turns_, turntype, ingress_tile,
+                                    ingress_edge)) {
+    // This is a generalized search cost only; do not alter ETA.
+    c.cost += kMultiLaneRightTurnPenalty;
   }
   return c;
 }
@@ -624,6 +669,7 @@ void ParseMotorScooterCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kTopSpeedRange, json, "/top_speed", top_speed, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseHillsRange, json, "/use_hills", use_hills, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUsePrimaryRange, json, "/use_primary", use_primary, warnings);
+  JSON_PBF_DEFAULT_V2(co, false, json, "/avoid_multi_lane_right_turns", avoid_multi_lane_right_turns);
 }
 
 cost_ptr_t CreateMotorScooterCost(const Costing& costing_options) {
@@ -644,7 +690,7 @@ namespace {
 
 class TestMotorScooterCost : public MotorScooterCost {
 public:
-  TestMotorScooterCost(const Costing& costing_options) : MotorScooterCost(costing_options){};
+  TestMotorScooterCost(const Costing& costing_options) : MotorScooterCost(costing_options) {};
 
   using MotorScooterCost::alley_penalty_;
   using MotorScooterCost::country_crossing_cost_;
@@ -677,6 +723,29 @@ template <typename T>
 std::uniform_int_distribution<T>* make_int_distributor_from_range(const ranged_default_t<T>& range) {
   T rangeLength = range.max - range.min;
   return new std::uniform_int_distribution<T>(range.min - rangeLength, range.max + rangeLength);
+}
+
+TEST(MotorscooterCost, testMultiLaneRightTurnOption) {
+  Api disabled_request;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, disabled_request);
+  TestMotorScooterCost disabled(
+      disabled_request.options().costings().find(Costing::motor_scooter)->second);
+  EXPECT_FALSE(disabled.avoid_multi_lane_right_turns_);
+
+  Api enabled_request;
+  ParseApi(
+      R"({"costing":"motor_scooter","costing_options":{"motor_scooter":{"avoid_multi_lane_right_turns":true}}})",
+      valhalla::Options::route, enabled_request);
+  TestMotorScooterCost enabled(
+      enabled_request.options().costings().find(Costing::motor_scooter)->second);
+  EXPECT_TRUE(enabled.avoid_multi_lane_right_turns_);
+
+  EXPECT_TRUE(IsRightTurn(Turn::Type::kRight));
+  EXPECT_TRUE(IsRightTurn(Turn::Type::kSharpRight));
+  EXPECT_FALSE(IsRightTurn(Turn::Type::kStraight));
+  EXPECT_FALSE(IsRightTurn(Turn::Type::kLeft));
+  EXPECT_FALSE(IsRightTurn(Turn::Type::kSharpLeft));
+  EXPECT_FALSE(IsRightTurn(Turn::Type::kReverse));
 }
 
 TEST(MotorscooterCost, testMotorScooterCostParams) {
