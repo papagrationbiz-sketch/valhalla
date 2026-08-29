@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
+#include <iterator>
 
 #ifdef INLINE_TEST
 #include "test.h"
@@ -34,6 +36,8 @@ constexpr float kDefaultDestinationOnlyPenalty = 120.0f; // Seconds
 // Other options
 constexpr float kDefaultUseHills = 0.5f;   // Factor between 0 and 1
 constexpr float kDefaultUsePrimary = 0.5f; // Factor between 0 and 1
+// Each road class preference defaults to the value of use_primary when the request
+// omits it, so a request that only sets use_primary keeps behaving exactly as before.
 constexpr float kMultiLaneRightTurnPenalty = 60.0f;
 // Signals and stop signs are ubiquitous, so both default to no penalty. A route only
 // avoids them when the request explicitly asks for it.
@@ -81,6 +85,12 @@ constexpr float kDestinationOnlyFactor = 0.2f;
 // roads. These penalties are modulated by the road factor - further
 // avoiding higher class roads for those with low propensity for using
 // primary roads.
+// Floor applied to a road class weight when a request asks to avoid that class.
+// Residential is weighted 0.0 and unclassified 0.05, so without this the avoid
+// direction would be a no-op for exactly the classes riders most want to steer
+// away from on a moped.
+constexpr float kMinAvoidableRoadClassFactor = 0.1f;
+
 constexpr float kRoadClassFactor[] = {
     1.0f,  // Motorway
     0.5f,  // Trunk
@@ -375,7 +385,9 @@ public:
   // Hidden in source file so we don't need it to be protected
   // We expose it within the source file for testing purposes
 public:
-  float road_factor_; // Road factor based on use_primary
+  // Per road class weighting, derived from the use_* preferences. Replaces the single
+  // use_primary derived scalar that used to modulate every class at once.
+  float road_class_factor_[std::size(kRoadClassFactor)];
   bool avoid_multi_lane_right_turns_;
   float traffic_signal_penalty_; // Seconds added when passing a traffic signal
   float stop_sign_penalty_;      // Seconds added when passing a stop sign
@@ -404,12 +416,58 @@ MotorScooterCost::MotorScooterCost(const Costing& costing)
     grade_penalty_[i] = avoid_hills * kAvoidHillsStrength[i];
   }
 
-  // Set the road classification factor based on use_primary option - scales from
-  // 0 (avoid primary roads) to 1 (don't avoid primary roads). Above 0.5 start to
-  // reduce the weight difference between road classes while factors below 0.5
-  // start to increase the differences.
-  float use_primary = costing_options.use_primary();
-  road_factor_ = (use_primary >= 0.5f) ? 1.5f - use_primary : 3.0f - use_primary * 5.0f;
+  // Set the road classification factors from the use_* options. Each scales from
+  // 0 (avoid this class) to 1 (don't avoid it). Above 0.5 the weight difference
+  // between road classes shrinks; below 0.5 it grows.
+  //
+  // motor_scooter used to expose use_primary alone and apply the scalar it derived
+  // to every class, so "prefer minor roads" could not be expressed at all. Each
+  // class now has its own preference, and any class the request leaves out falls
+  // back to use_primary, which keeps an existing use_primary-only request identical.
+  const float use_primary = costing_options.use_primary();
+  // Motorway, trunk and primary follow use_primary. The remaining classes follow their own
+  // preference when the request named one and fall back to use_primary otherwise, which is
+  // what keeps a use_primary-only request identical to the behaviour before these options
+  // existed.
+  struct ClassPreference {
+    float use_value;
+    bool named;
+  };
+  const ClassPreference preference_by_class[std::size(kRoadClassFactor)] = {
+      {use_primary, false},
+      {use_primary, false},
+      {use_primary, false},
+      {costing_options.has_use_secondary() ? costing_options.use_secondary() : use_primary,
+       costing_options.has_use_secondary()},
+      {costing_options.has_use_tertiary() ? costing_options.use_tertiary() : use_primary,
+       costing_options.has_use_tertiary()},
+      {costing_options.has_use_unclassified() ? costing_options.use_unclassified() : use_primary,
+       costing_options.has_use_unclassified()},
+      {costing_options.has_use_residential() ? costing_options.use_residential() : use_primary,
+       costing_options.has_use_residential()},
+      {costing_options.has_use_service() ? costing_options.use_service() : use_primary,
+       costing_options.has_use_service()},
+  };
+
+  for (size_t i = 0; i < std::size(kRoadClassFactor); ++i) {
+    const float use_value = preference_by_class[i].use_value;
+    const float scale = (use_value >= 0.5f) ? 1.5f - use_value : 3.0f - use_value * 5.0f;
+
+    // Residential is weighted 0.0 and unclassified 0.05, so scaling alone can never express
+    // avoiding them - zero stays zero however hard the scale pushes. Raise a floor for those
+    // classes as the preference moves below 0.5, ramping in from nothing at 0.5 to the full
+    // floor at 0 so there is no step in cost as a caller sweeps the value.
+    //
+    // The floor applies only to a class the request named. A class that merely inherited
+    // use_primary keeps its original weight, so use_primary on its own still reproduces the
+    // old numbers exactly, including for use_primary below 0.5.
+    float weight = kRoadClassFactor[i];
+    if (preference_by_class[i].named && use_value < 0.5f) {
+      const float ramp = 1.0f - use_value * 2.0f;
+      weight = std::max(weight, kMinAvoidableRoadClassFactor * ramp);
+    }
+    road_class_factor_[i] = scale * weight;
+  }
 }
 
 // Check if access is allowed on the specified edge.
@@ -492,7 +550,7 @@ Cost MotorScooterCost::EdgeCost(const baldr::DirectedEdge* edge,
   }
 
   float factor = 1.0f + (kDensityFactor[edge->density()] - 0.85f) +
-                 (road_factor_ * kRoadClassFactor[static_cast<uint32_t>(edge->classification())]) +
+                 road_class_factor_[static_cast<uint32_t>(edge->classification())] +
                  grade_penalty_[static_cast<uint32_t>(edge->weighted_grade())] +
                  SpeedPenalty(edge, tile, time_info, flow_sources, speed);
 
@@ -702,6 +760,27 @@ void ParseMotorScooterCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kTopSpeedRange, json, "/top_speed", top_speed, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseHillsRange, json, "/use_hills", use_hills, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUsePrimaryRange, json, "/use_primary", use_primary, warnings);
+
+  // Only set a road class preference the request actually named. JSON_PBF_RANGED_DEFAULT
+  // always calls the setter, which would leave every presence bit set and make an
+  // omitted class indistinguishable from an explicit one - and the two are treated
+  // differently below, so that distinction has to survive parsing.
+  const auto parse_class = [&](const char* key, void (Costing::Options::*setter)(float)) {
+    if (auto value = rapidjson::get_optional<float>(json, key)) {
+      bool clamped = false;
+      (co->*setter)(kUsePrimaryRange(*value, clamped));
+      if (clamped) {
+        auto warning = warnings.Add();
+        warning->set_description("'" + std::string(key) + "' has been clamped.");
+        warning->set_code(400);
+      }
+    }
+  };
+  parse_class("/use_secondary", &Costing::Options::set_use_secondary);
+  parse_class("/use_tertiary", &Costing::Options::set_use_tertiary);
+  parse_class("/use_unclassified", &Costing::Options::set_use_unclassified);
+  parse_class("/use_residential", &Costing::Options::set_use_residential);
+  parse_class("/use_service", &Costing::Options::set_use_service);
   JSON_PBF_DEFAULT_V2(co, false, json, "/avoid_multi_lane_right_turns", avoid_multi_lane_right_turns);
   JSON_PBF_RANGED_DEFAULT(co, kTrafficSignalPenaltyRange, json, "/traffic_signal_penalty",
                           traffic_signal_penalty, warnings);
@@ -737,6 +816,7 @@ public:
   using MotorScooterCost::maneuver_penalty_;
   using MotorScooterCost::service_factor_;
   using MotorScooterCost::service_penalty_;
+  using MotorScooterCost::road_class_factor_;
   using MotorScooterCost::stop_sign_penalty_;
   using MotorScooterCost::top_speed_;
   using MotorScooterCost::traffic_signal_penalty_;
@@ -783,6 +863,85 @@ TEST(MotorscooterCost, testTrafficSignalPenaltyIsParsed) {
 
   EXPECT_FLOAT_EQ(cost.traffic_signal_penalty_, 45.5f);
   EXPECT_FLOAT_EQ(cost.stop_sign_penalty_, 12.25f);
+}
+
+namespace {
+// The weighting motor_scooter applied before per-class preferences existed: one scalar
+// from use_primary multiplied into every class weight.
+float LegacyRoadClassFactor(float use_primary, size_t road_class) {
+  const float scale = (use_primary >= 0.5f) ? 1.5f - use_primary : 3.0f - use_primary * 5.0f;
+  return scale * kRoadClassFactor[road_class];
+}
+
+TestMotorScooterCost* make_cost(const std::string& costing_options_json) {
+  Api request;
+  ParseApi(R"({"costing":"motor_scooter","costing_options":{"motor_scooter":)" +
+               costing_options_json + "}}",
+           valhalla::Options::route, request);
+  return new TestMotorScooterCost(
+      request.options().costings().find(Costing::motor_scooter)->second);
+}
+} // namespace
+
+TEST(MotorscooterCost, testUsePrimaryAloneKeepsLegacyWeights) {
+  // The property that matters most: a request naming only use_primary must weight every
+  // class exactly as it did before the per-class options existed. 0.2 is included because
+  // it drives the classes whose weight is 0.0 or 0.05, where an avoid floor would show up.
+  for (float use_primary : {0.0f, 0.2f, 0.5f, 0.9f, 1.0f}) {
+    std::shared_ptr<TestMotorScooterCost> cost(
+        make_cost(R"({"use_primary":)" + std::to_string(use_primary) + "}"));
+    for (size_t i = 0; i < std::size(kRoadClassFactor); ++i) {
+      EXPECT_FLOAT_EQ(cost->road_class_factor_[i], LegacyRoadClassFactor(use_primary, i))
+          << "use_primary=" << use_primary << " class=" << i;
+    }
+  }
+}
+
+TEST(MotorscooterCost, testDefaultRequestKeepsLegacyWeights) {
+  Api request;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, request);
+  TestMotorScooterCost cost(request.options().costings().find(Costing::motor_scooter)->second);
+
+  for (size_t i = 0; i < std::size(kRoadClassFactor); ++i) {
+    EXPECT_FLOAT_EQ(cost.road_class_factor_[i], LegacyRoadClassFactor(kDefaultUsePrimary, i));
+  }
+}
+
+TEST(MotorscooterCost, testNamingOneClassLeavesTheOthersOnUsePrimary) {
+  std::shared_ptr<TestMotorScooterCost> cost(
+      make_cost(R"({"use_primary":0.2,"use_residential":1.0})"));
+
+  const auto residential = static_cast<size_t>(baldr::RoadClass::kResidential);
+  for (size_t i = 0; i < std::size(kRoadClassFactor); ++i) {
+    if (i == residential) {
+      continue;
+    }
+    EXPECT_FLOAT_EQ(cost->road_class_factor_[i], LegacyRoadClassFactor(0.2f, i)) << "class=" << i;
+  }
+  // Residential is weighted 0.0, so preferring it cannot move the weight off zero.
+  EXPECT_FLOAT_EQ(cost->road_class_factor_[residential], 0.0f);
+}
+
+TEST(MotorscooterCost, testAvoidingAZeroWeightedClassIsExpressible) {
+  const auto residential = static_cast<size_t>(baldr::RoadClass::kResidential);
+
+  std::shared_ptr<TestMotorScooterCost> neutral(make_cost(R"({"use_residential":0.5})"));
+  EXPECT_FLOAT_EQ(neutral->road_class_factor_[residential], 0.0f)
+      << "0.5 is the neutral point and must not raise the floor";
+
+  std::shared_ptr<TestMotorScooterCost> avoiding(make_cost(R"({"use_residential":0.0})"));
+  EXPECT_GT(avoiding->road_class_factor_[residential], 0.0f);
+}
+
+TEST(MotorscooterCost, testAvoidFloorRampsInWithoutAStep) {
+  // Sweeping the preference across 0.5 must not jump: the floor ramps in from nothing.
+  const auto residential = static_cast<size_t>(baldr::RoadClass::kResidential);
+  std::shared_ptr<TestMotorScooterCost> just_above(make_cost(R"({"use_residential":0.51})"));
+  std::shared_ptr<TestMotorScooterCost> just_below(make_cost(R"({"use_residential":0.49})"));
+
+  const float step = std::abs(just_below->road_class_factor_[residential] -
+                              just_above->road_class_factor_[residential]);
+  EXPECT_LT(step, 0.01f) << "crossing 0.5 must be continuous";
 }
 
 TEST(MotorscooterCost, testMultiLaneRightTurnOption) {
