@@ -35,6 +35,10 @@ constexpr float kDefaultDestinationOnlyPenalty = 120.0f; // Seconds
 constexpr float kDefaultUseHills = 0.5f;   // Factor between 0 and 1
 constexpr float kDefaultUsePrimary = 0.5f; // Factor between 0 and 1
 constexpr float kMultiLaneRightTurnPenalty = 60.0f;
+// Signals and stop signs are ubiquitous, so both default to no penalty. A route only
+// avoids them when the request explicitly asks for it.
+constexpr float kDefaultTrafficSignalPenalty = 0.0f; // Seconds
+constexpr float kDefaultStopSignPenalty = 0.0f;      // Seconds
 
 constexpr uint32_t kMinimumTopSpeed = 20;  // Kilometers per hour
 constexpr uint32_t kDefaultTopSpeed = 45;  // Kilometers per hour
@@ -66,6 +70,9 @@ constexpr ranged_default_t<float> kUseHillsRange{0, kDefaultUseHills, 1.0f};
 constexpr ranged_default_t<float> kUsePrimaryRange{0, kDefaultUsePrimary, 1.0f};
 constexpr ranged_default_t<uint32_t> kTopSpeedRange{kMinimumTopSpeed, kDefaultTopSpeed,
                                                     kMaximumTopSpeed};
+constexpr ranged_default_t<float> kTrafficSignalPenaltyRange{0.0f, kDefaultTrafficSignalPenalty,
+                                                            kMaxPenalty};
+constexpr ranged_default_t<float> kStopSignPenaltyRange{0.0f, kDefaultStopSignPenalty, kMaxPenalty};
 
 // Additional penalty to avoid destination only
 constexpr float kDestinationOnlyFactor = 0.2f;
@@ -370,6 +377,8 @@ public:
 public:
   float road_factor_; // Road factor based on use_primary
   bool avoid_multi_lane_right_turns_;
+  float traffic_signal_penalty_; // Seconds added when passing a traffic signal
+  float stop_sign_penalty_;      // Seconds added when passing a stop sign
 
   // Elevation/grade penalty (weighting applied based on the edge's weighted
   // grade (relative value from 0-15)
@@ -379,7 +388,9 @@ public:
 // Constructor
 MotorScooterCost::MotorScooterCost(const Costing& costing)
     : DynamicCost(costing, TravelMode::kDrive, kMopedAccess),
-      avoid_multi_lane_right_turns_(costing.options().avoid_multi_lane_right_turns()) {
+      avoid_multi_lane_right_turns_(costing.options().avoid_multi_lane_right_turns()),
+      traffic_signal_penalty_(costing.options().traffic_signal_penalty()),
+      stop_sign_penalty_(costing.options().stop_sign_penalty()) {
   const auto& costing_options = costing.options();
 
   // Get the base costs
@@ -565,13 +576,27 @@ Cost MotorScooterCost::TransitionCost(
     }
     c.cost += seconds;
   }
-  if (avoid_multi_lane_right_turns_ && IsRightTurn(turntype)) {
+  if (traffic_signal_penalty_ > 0.0f && node->traffic_signal()) {
+    // This is a generalized search cost only; do not alter ETA.
+    c.cost += traffic_signal_penalty_;
+  }
+
+  // Both the multi-lane right turn check and the stop sign live on the edge we are leaving,
+  // so only reach for the graph reader once and only when one of them is requested.
+  const bool needs_ingress_edge =
+      (avoid_multi_lane_right_turns_ && IsRightTurn(turntype)) || stop_sign_penalty_ > 0.0f;
+  if (needs_ingress_edge) {
     auto reader = reader_getter();
     const auto ingress_tile = reader.GetGraphTile(pred.edgeid());
     const auto* ingress_edge = ingress_tile ? ingress_tile->directededge(pred.edgeid()) : nullptr;
-    if (IsPenalizedMultiLaneRightTurn(true, turntype, ingress_tile, ingress_edge)) {
+    if (IsPenalizedMultiLaneRightTurn(avoid_multi_lane_right_turns_, turntype, ingress_tile,
+                                      ingress_edge)) {
       // This is a generalized search cost only; do not alter ETA.
       c.cost += kMultiLaneRightTurnPenalty;
+    }
+    if (stop_sign_penalty_ > 0.0f && ingress_edge && ingress_edge->stop_sign()) {
+      // This is a generalized search cost only; do not alter ETA.
+      c.cost += stop_sign_penalty_;
     }
   }
   return c;
@@ -651,6 +676,14 @@ Cost MotorScooterCost::TransitionCostReverse(
     // This is a generalized search cost only; do not alter ETA.
     c.cost += kMultiLaneRightTurnPenalty;
   }
+  if (traffic_signal_penalty_ > 0.0f && node->traffic_signal()) {
+    // This is a generalized search cost only; do not alter ETA.
+    c.cost += traffic_signal_penalty_;
+  }
+  if (stop_sign_penalty_ > 0.0f && ingress_edge && ingress_edge->stop_sign()) {
+    // This is a generalized search cost only; do not alter ETA.
+    c.cost += stop_sign_penalty_;
+  }
   return c;
 }
 
@@ -670,6 +703,10 @@ void ParseMotorScooterCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kUseHillsRange, json, "/use_hills", use_hills, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUsePrimaryRange, json, "/use_primary", use_primary, warnings);
   JSON_PBF_DEFAULT_V2(co, false, json, "/avoid_multi_lane_right_turns", avoid_multi_lane_right_turns);
+  JSON_PBF_RANGED_DEFAULT(co, kTrafficSignalPenaltyRange, json, "/traffic_signal_penalty",
+                          traffic_signal_penalty, warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kStopSignPenaltyRange, json, "/stop_sign_penalty", stop_sign_penalty,
+                          warnings);
 }
 
 cost_ptr_t CreateMotorScooterCost(const Costing& costing_options) {
@@ -700,7 +737,9 @@ public:
   using MotorScooterCost::maneuver_penalty_;
   using MotorScooterCost::service_factor_;
   using MotorScooterCost::service_penalty_;
+  using MotorScooterCost::stop_sign_penalty_;
   using MotorScooterCost::top_speed_;
+  using MotorScooterCost::traffic_signal_penalty_;
 };
 
 TestMotorScooterCost* make_motorscootercost_from_json(const std::string& property, float testVal) {
@@ -723,6 +762,27 @@ template <typename T>
 std::uniform_int_distribution<T>* make_int_distributor_from_range(const ranged_default_t<T>& range) {
   T rangeLength = range.max - range.min;
   return new std::uniform_int_distribution<T>(range.min - rangeLength, range.max + rangeLength);
+}
+
+TEST(MotorscooterCost, testTrafficSignalPenaltyDefaultsToZero) {
+  Api request;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, request);
+  TestMotorScooterCost cost(request.options().costings().find(Costing::motor_scooter)->second);
+
+  // Signals are everywhere, so the default must not change existing routes.
+  EXPECT_EQ(cost.traffic_signal_penalty_, kDefaultTrafficSignalPenalty);
+  EXPECT_EQ(cost.stop_sign_penalty_, kDefaultStopSignPenalty);
+}
+
+TEST(MotorscooterCost, testTrafficSignalPenaltyIsParsed) {
+  Api request;
+  ParseApi(
+      R"({"costing":"motor_scooter","costing_options":{"motor_scooter":{"traffic_signal_penalty":45.5,"stop_sign_penalty":12.25}}})",
+      valhalla::Options::route, request);
+  TestMotorScooterCost cost(request.options().costings().find(Costing::motor_scooter)->second);
+
+  EXPECT_FLOAT_EQ(cost.traffic_signal_penalty_, 45.5f);
+  EXPECT_FLOAT_EQ(cost.stop_sign_penalty_, 12.25f);
 }
 
 TEST(MotorscooterCost, testMultiLaneRightTurnOption) {
@@ -833,6 +893,24 @@ TEST(MotorscooterCost, testMotorScooterCostParams) {
   for (unsigned i = 0; i < testIterations; ++i) {
     ctorTester.reset(make_motorscootercost_from_json("top_speed", (*iDistributor)(generator)));
     EXPECT_THAT(ctorTester->top_speed_, test::IsBetween(kTopSpeedRange.min, kTopSpeedRange.max));
+  }
+
+  // traffic_signal_penalty_
+  fDistributor.reset(make_real_distributor_from_range(kTrafficSignalPenaltyRange));
+  for (unsigned i = 0; i < testIterations; ++i) {
+    ctorTester.reset(
+        make_motorscootercost_from_json("traffic_signal_penalty", (*fDistributor)(generator)));
+    EXPECT_THAT(ctorTester->traffic_signal_penalty_,
+                test::IsBetween(kTrafficSignalPenaltyRange.min, kTrafficSignalPenaltyRange.max));
+  }
+
+  // stop_sign_penalty_
+  fDistributor.reset(make_real_distributor_from_range(kStopSignPenaltyRange));
+  for (unsigned i = 0; i < testIterations; ++i) {
+    ctorTester.reset(
+        make_motorscootercost_from_json("stop_sign_penalty", (*fDistributor)(generator)));
+    EXPECT_THAT(ctorTester->stop_sign_penalty_,
+                test::IsBetween(kStopSignPenaltyRange.min, kStopSignPenaltyRange.max));
   }
 
   // service_penalty_
