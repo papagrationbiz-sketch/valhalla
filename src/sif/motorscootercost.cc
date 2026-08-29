@@ -43,6 +43,9 @@ constexpr float kMultiLaneRightTurnPenalty = 60.0f;
 // avoids them when the request explicitly asks for it.
 constexpr float kDefaultTrafficSignalPenalty = 0.0f; // Seconds
 constexpr float kDefaultStopSignPenalty = 0.0f;      // Seconds
+// Cost of turning onto a residential or service road, the same option the truck costing
+// already exposes. Defaults to 0 so a route only changes when a request asks for it.
+constexpr float kDefaultLowClassPenalty = 0.0f; // Seconds
 
 constexpr uint32_t kMinimumTopSpeed = 20;  // Kilometers per hour
 constexpr uint32_t kDefaultTopSpeed = 45;  // Kilometers per hour
@@ -77,6 +80,8 @@ constexpr ranged_default_t<uint32_t> kTopSpeedRange{kMinimumTopSpeed, kDefaultTo
 constexpr ranged_default_t<float> kTrafficSignalPenaltyRange{0.0f, kDefaultTrafficSignalPenalty,
                                                             kMaxPenalty};
 constexpr ranged_default_t<float> kStopSignPenaltyRange{0.0f, kDefaultStopSignPenalty, kMaxPenalty};
+constexpr ranged_default_t<float> kLowClassPenaltyRange{0.0f, kDefaultLowClassPenalty,
+                                                        kMaxPenalty};
 
 // Additional penalty to avoid destination only
 constexpr float kDestinationOnlyFactor = 0.2f;
@@ -391,6 +396,10 @@ public:
   bool avoid_multi_lane_right_turns_;
   float traffic_signal_penalty_; // Seconds added when passing a traffic signal
   float stop_sign_penalty_;      // Seconds added when passing a stop sign
+  // Seconds added when turning onto a residential or service road. use_residential weights
+  // the distance travelled on such roads; this is paid per entry, so a rider can accept one
+  // long back street while still avoiding a chain of short ones.
+  float low_class_penalty_;
 
   // Elevation/grade penalty (weighting applied based on the edge's weighted
   // grade (relative value from 0-15)
@@ -402,7 +411,8 @@ MotorScooterCost::MotorScooterCost(const Costing& costing)
     : DynamicCost(costing, TravelMode::kDrive, kMopedAccess),
       avoid_multi_lane_right_turns_(costing.options().avoid_multi_lane_right_turns()),
       traffic_signal_penalty_(costing.options().traffic_signal_penalty()),
-      stop_sign_penalty_(costing.options().stop_sign_penalty()) {
+      stop_sign_penalty_(costing.options().stop_sign_penalty()),
+      low_class_penalty_(costing.options().low_class_penalty()) {
   const auto& costing_options = costing.options();
 
   // Get the base costs
@@ -634,6 +644,11 @@ Cost MotorScooterCost::TransitionCost(
     }
     c.cost += seconds;
   }
+  if (low_class_penalty_ > 0.0f && (edge->classification() == baldr::RoadClass::kResidential ||
+                                    edge->classification() == baldr::RoadClass::kServiceOther)) {
+    // This is a generalized search cost only; do not alter ETA.
+    c.cost += low_class_penalty_;
+  }
   if (traffic_signal_penalty_ > 0.0f && node->traffic_signal()) {
     // This is a generalized search cost only; do not alter ETA.
     c.cost += traffic_signal_penalty_;
@@ -734,6 +749,12 @@ Cost MotorScooterCost::TransitionCostReverse(
     // This is a generalized search cost only; do not alter ETA.
     c.cost += kMultiLaneRightTurnPenalty;
   }
+  if (low_class_penalty_ > 0.0f &&
+      (outgoing_edge->classification() == baldr::RoadClass::kResidential ||
+       outgoing_edge->classification() == baldr::RoadClass::kServiceOther)) {
+    // This is a generalized search cost only; do not alter ETA.
+    c.cost += low_class_penalty_;
+  }
   if (traffic_signal_penalty_ > 0.0f && node->traffic_signal()) {
     // This is a generalized search cost only; do not alter ETA.
     c.cost += traffic_signal_penalty_;
@@ -786,6 +807,8 @@ void ParseMotorScooterCostOptions(const rapidjson::Document& doc,
                           traffic_signal_penalty, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kStopSignPenaltyRange, json, "/stop_sign_penalty", stop_sign_penalty,
                           warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kLowClassPenaltyRange, json, "/low_class_penalty",
+                          low_class_penalty, warnings);
 }
 
 cost_ptr_t CreateMotorScooterCost(const Costing& costing_options) {
@@ -816,6 +839,7 @@ public:
   using MotorScooterCost::maneuver_penalty_;
   using MotorScooterCost::service_factor_;
   using MotorScooterCost::service_penalty_;
+  using MotorScooterCost::low_class_penalty_;
   using MotorScooterCost::road_class_factor_;
   using MotorScooterCost::stop_sign_penalty_;
   using MotorScooterCost::top_speed_;
@@ -942,6 +966,16 @@ TEST(MotorscooterCost, testAvoidFloorRampsInWithoutAStep) {
   const float step = std::abs(just_below->road_class_factor_[residential] -
                               just_above->road_class_factor_[residential]);
   EXPECT_LT(step, 0.01f) << "crossing 0.5 must be continuous";
+}
+
+TEST(MotorscooterCost, testLowClassPenaltyDefaultsToZeroAndParses) {
+  Api defaults;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, defaults);
+  TestMotorScooterCost unset(defaults.options().costings().find(Costing::motor_scooter)->second);
+  EXPECT_EQ(unset.low_class_penalty_, kDefaultLowClassPenalty);
+
+  std::shared_ptr<TestMotorScooterCost> set(make_cost(R"({"low_class_penalty":45})"));
+  EXPECT_FLOAT_EQ(set->low_class_penalty_, 45.0f);
 }
 
 TEST(MotorscooterCost, testMultiLaneRightTurnOption) {
