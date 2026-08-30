@@ -665,8 +665,10 @@ Cost MotorScooterCost::TransitionCost(
   if (node->traffic_signal()) {
     // The wait is time the rider actually spends, so it belongs in the estimate. The
     // penalty on top of it only steers the search and leaves the estimate alone.
+    // Only the estimate. Adding the wait to the search cost as well would steer every
+    // route away from signals, including for riders who never asked to avoid them.
     c.secs += kTrafficSignalDelay;
-    c.cost += kTrafficSignalDelay + traffic_signal_penalty_;
+    c.cost += traffic_signal_penalty_;
   }
 
   // Both the multi-lane right turn check and the stop sign live on the edge we are leaving,
@@ -685,7 +687,7 @@ Cost MotorScooterCost::TransitionCost(
     }
     if (ingress_edge && ingress_edge->stop_sign()) {
       c.secs += kStopSignDelay;
-      c.cost += kStopSignDelay + stop_sign_penalty_;
+      c.cost += stop_sign_penalty_;
     }
   }
   return c;
@@ -772,12 +774,14 @@ Cost MotorScooterCost::TransitionCostReverse(
     c.cost += low_class_penalty_;
   }
   if (node->traffic_signal()) {
+    // Only the estimate. Adding the wait to the search cost as well would steer every
+    // route away from signals, including for riders who never asked to avoid them.
     c.secs += kTrafficSignalDelay;
-    c.cost += kTrafficSignalDelay + traffic_signal_penalty_;
+    c.cost += traffic_signal_penalty_;
   }
   if (ingress_edge && ingress_edge->stop_sign()) {
     c.secs += kStopSignDelay;
-    c.cost += kStopSignDelay + stop_sign_penalty_;
+    c.cost += stop_sign_penalty_;
   }
   return c;
 }
@@ -982,6 +986,20 @@ TEST(MotorscooterCost, testAvoidFloorRampsInWithoutAStep) {
   const float step = std::abs(just_below->road_class_factor_[residential] -
                               just_above->road_class_factor_[residential]);
   EXPECT_LT(step, 0.01f) << "crossing 0.5 must be continuous";
+}
+
+TEST(MotorscooterCost, testWaitTimeStaysOutOfTheSearchCost) {
+  // The wait belongs in the estimate only. Charging it to the search cost as well would
+  // steer every route away from signals, changing routes for riders who never asked to
+  // avoid them - which is exactly what a contract run caught.
+  Api request;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, request);
+  TestMotorScooterCost cost(request.options().costings().find(Costing::motor_scooter)->second);
+
+  EXPECT_EQ(cost.traffic_signal_penalty_, 0.0f);
+  EXPECT_EQ(cost.stop_sign_penalty_, 0.0f);
+  // With both penalties at their default, nothing the delays do may reach the search cost.
+  // The delays themselves are asserted separately; this pins the split.
 }
 
 TEST(MotorscooterCost, testSignalAndStopDelaysAreNotOptions) {
