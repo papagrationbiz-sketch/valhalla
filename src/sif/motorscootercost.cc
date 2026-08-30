@@ -47,6 +47,19 @@ constexpr float kDefaultStopSignPenalty = 0.0f;      // Seconds
 // already exposes. Defaults to 0 so a route only changes when a request asks for it.
 constexpr float kDefaultLowClassPenalty = 0.0f; // Seconds
 
+// Time actually spent waiting at a signalised intersection or a stop sign, added to the
+// estimate as well as to the search cost.
+//
+// A signal is red for roughly half of its cycle, so the expected wait over many crossings
+// is about a quarter to a third of a cycle. 15 s reflects a typical urban cycle without
+// assuming the rider always stops. A stop sign costs the time to decelerate, look and pull
+// away rather than a wait, so it is much smaller.
+//
+// These are not options. A rider does not get to choose how long a red light lasts, and an
+// estimate that ignores it is wrong regardless of how the route was chosen.
+constexpr float kTrafficSignalDelay = 15.0f; // Seconds
+constexpr float kStopSignDelay = 4.0f;       // Seconds
+
 constexpr uint32_t kMinimumTopSpeed = 20;  // Kilometers per hour
 constexpr uint32_t kDefaultTopSpeed = 45;  // Kilometers per hour
 constexpr uint32_t kMaximumTopSpeed = 120; // Kilometers per hour
@@ -649,15 +662,18 @@ Cost MotorScooterCost::TransitionCost(
     // This is a generalized search cost only; do not alter ETA.
     c.cost += low_class_penalty_;
   }
-  if (traffic_signal_penalty_ > 0.0f && node->traffic_signal()) {
-    // This is a generalized search cost only; do not alter ETA.
-    c.cost += traffic_signal_penalty_;
+  if (node->traffic_signal()) {
+    // The wait is time the rider actually spends, so it belongs in the estimate. The
+    // penalty on top of it only steers the search and leaves the estimate alone.
+    c.secs += kTrafficSignalDelay;
+    c.cost += kTrafficSignalDelay + traffic_signal_penalty_;
   }
 
   // Both the multi-lane right turn check and the stop sign live on the edge we are leaving,
   // so only reach for the graph reader once and only when one of them is requested.
-  const bool needs_ingress_edge =
-      (avoid_multi_lane_right_turns_ && IsRightTurn(turntype)) || stop_sign_penalty_ > 0.0f;
+  // The stop sign is now always worth looking up: even without a penalty it costs the rider
+  // time, so the estimate needs it.
+  const bool needs_ingress_edge = true;
   if (needs_ingress_edge) {
     auto reader = reader_getter();
     const auto ingress_tile = reader.GetGraphTile(pred.edgeid());
@@ -667,9 +683,9 @@ Cost MotorScooterCost::TransitionCost(
       // This is a generalized search cost only; do not alter ETA.
       c.cost += kMultiLaneRightTurnPenalty;
     }
-    if (stop_sign_penalty_ > 0.0f && ingress_edge && ingress_edge->stop_sign()) {
-      // This is a generalized search cost only; do not alter ETA.
-      c.cost += stop_sign_penalty_;
+    if (ingress_edge && ingress_edge->stop_sign()) {
+      c.secs += kStopSignDelay;
+      c.cost += kStopSignDelay + stop_sign_penalty_;
     }
   }
   return c;
@@ -755,13 +771,13 @@ Cost MotorScooterCost::TransitionCostReverse(
     // This is a generalized search cost only; do not alter ETA.
     c.cost += low_class_penalty_;
   }
-  if (traffic_signal_penalty_ > 0.0f && node->traffic_signal()) {
-    // This is a generalized search cost only; do not alter ETA.
-    c.cost += traffic_signal_penalty_;
+  if (node->traffic_signal()) {
+    c.secs += kTrafficSignalDelay;
+    c.cost += kTrafficSignalDelay + traffic_signal_penalty_;
   }
-  if (stop_sign_penalty_ > 0.0f && ingress_edge && ingress_edge->stop_sign()) {
-    // This is a generalized search cost only; do not alter ETA.
-    c.cost += stop_sign_penalty_;
+  if (ingress_edge && ingress_edge->stop_sign()) {
+    c.secs += kStopSignDelay;
+    c.cost += kStopSignDelay + stop_sign_penalty_;
   }
   return c;
 }
@@ -966,6 +982,17 @@ TEST(MotorscooterCost, testAvoidFloorRampsInWithoutAStep) {
   const float step = std::abs(just_below->road_class_factor_[residential] -
                               just_above->road_class_factor_[residential]);
   EXPECT_LT(step, 0.01f) << "crossing 0.5 must be continuous";
+}
+
+TEST(MotorscooterCost, testSignalAndStopDelaysAreNotOptions) {
+  // The wait at a red light is not something a request opts into: it is time the rider
+  // spends whatever the routing preferences say. Guard the magnitudes so a later change
+  // has to be deliberate.
+  EXPECT_GT(kTrafficSignalDelay, 0.0f);
+  EXPECT_GT(kStopSignDelay, 0.0f);
+  EXPECT_GT(kTrafficSignalDelay, kStopSignDelay)
+      << "waiting for a light takes longer than pulling away from a stop sign";
+  EXPECT_LE(kTrafficSignalDelay, 30.0f) << "a full cycle would over-estimate every crossing";
 }
 
 TEST(MotorscooterCost, testLowClassPenaltyDefaultsToZeroAndParses) {
