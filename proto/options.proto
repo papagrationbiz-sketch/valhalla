@@ -357,6 +357,28 @@ message Costing {
     oneof has_multimodal_start_end_max_distance {
       uint32 multimodal_start_end_max_distance = 96;
     }
+    bool avoid_multi_lane_right_turns = 97;
+    oneof has_traffic_signal_penalty {
+      float traffic_signal_penalty = 98;
+    }
+    oneof has_stop_sign_penalty {
+      float stop_sign_penalty = 99;
+    }
+    oneof has_use_secondary {
+      float use_secondary = 100;
+    }
+    oneof has_use_tertiary {
+      float use_tertiary = 101;
+    }
+    oneof has_use_unclassified {
+      float use_unclassified = 102;
+    }
+    oneof has_use_residential {
+      float use_residential = 103;
+    }
+    oneof has_use_service {
+      float use_service = 104;
+    }
   }
 
   oneof has_options {

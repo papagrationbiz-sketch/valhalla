@@ -1,13 +1,19 @@
 #include "sif/motorscootercost.h"
 #include "baldr/directededge.h"
 #include "baldr/graphconstants.h"
+#include "baldr/graphreader.h"
+#include "baldr/graphtile.h"
 #include "baldr/nodeinfo.h"
 #include "baldr/rapidjson_utils.h"
 #include "proto_conversions.h"
 #include "sif/costconstants.h"
 #include "sif/osrm_car_duration.h"
+#include "sif/riderpreferences.h"
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
+#include <iterator>
 
 #ifdef INLINE_TEST
 #include "test.h"
@@ -31,6 +37,9 @@ constexpr float kDefaultDestinationOnlyPenalty = 120.0f; // Seconds
 // Other options
 constexpr float kDefaultUseHills = 0.5f;   // Factor between 0 and 1
 constexpr float kDefaultUsePrimary = 0.5f; // Factor between 0 and 1
+// Each road class preference defaults to the value of use_primary when the request
+// omits it, so a request that only sets use_primary keeps behaving exactly as before.
+constexpr float kMultiLaneRightTurnPenalty = 60.0f;
 
 constexpr uint32_t kMinimumTopSpeed = 20;  // Kilometers per hour
 constexpr uint32_t kDefaultTopSpeed = 45;  // Kilometers per hour
@@ -70,6 +79,7 @@ constexpr float kDestinationOnlyFactor = 0.2f;
 // roads. These penalties are modulated by the road factor - further
 // avoiding higher class roads for those with low propensity for using
 // primary roads.
+
 constexpr float kRoadClassFactor[] = {
     1.0f,  // Motorway
     0.5f,  // Trunk
@@ -138,6 +148,31 @@ BaseCostingOptionsConfig GetBaseCostOptsConfig() {
 }
 
 const BaseCostingOptionsConfig kBaseCostOptsConfig = GetBaseCostOptsConfig();
+
+bool IsRightTurn(const Turn::Type turntype) {
+  return turntype == Turn::Type::kRight || turntype == Turn::Type::kSharpRight;
+}
+
+uint32_t EffectiveIngressLaneCount(const graph_tile_ptr& ingress_tile,
+                                   const DirectedEdge* ingress_edge) {
+  if (!ingress_edge || ingress_edge->internal()) {
+    return 0;
+  }
+
+  const auto edge_index =
+      static_cast<uint32_t>(std::distance(ingress_tile->directededge(0), ingress_edge));
+  const auto turn_lane_count =
+      ingress_edge->turnlanes() ? ingress_tile->turnlanes(edge_index).size() : 0;
+  return std::max<uint32_t>(ingress_edge->lanecount(), turn_lane_count);
+}
+
+bool IsPenalizedMultiLaneRightTurn(const bool enabled,
+                                   const Turn::Type turntype,
+                                   const graph_tile_ptr& ingress_tile,
+                                   const DirectedEdge* ingress_edge) {
+  return enabled && IsRightTurn(turntype) && ingress_tile &&
+         EffectiveIngressLaneCount(ingress_tile, ingress_edge) >= 2;
+}
 
 } // namespace
 
@@ -339,7 +374,16 @@ public:
   // Hidden in source file so we don't need it to be protected
   // We expose it within the source file for testing purposes
 public:
-  float road_factor_; // Road factor based on use_primary
+  // Per road class weighting, derived from the use_* preferences. Replaces the single
+  // use_primary derived scalar that used to modulate every class at once.
+  float road_class_factor_[std::size(kRoadClassFactor)];
+  bool avoid_multi_lane_right_turns_;
+  float traffic_signal_penalty_; // Seconds added when passing a traffic signal
+  float stop_sign_penalty_;      // Seconds added when passing a stop sign
+  // Seconds added when turning onto a residential or service road. use_residential weights
+  // the distance travelled on such roads; this is paid per entry, so a rider can accept one
+  // long back street while still avoiding a chain of short ones.
+  float low_class_penalty_;
 
   // Elevation/grade penalty (weighting applied based on the edge's weighted
   // grade (relative value from 0-15)
@@ -348,7 +392,11 @@ public:
 
 // Constructor
 MotorScooterCost::MotorScooterCost(const Costing& costing)
-    : DynamicCost(costing, TravelMode::kDrive, kMopedAccess) {
+    : DynamicCost(costing, TravelMode::kDrive, kMopedAccess),
+      avoid_multi_lane_right_turns_(costing.options().avoid_multi_lane_right_turns()),
+      traffic_signal_penalty_(costing.options().traffic_signal_penalty()),
+      stop_sign_penalty_(costing.options().stop_sign_penalty()),
+      low_class_penalty_(costing.options().low_class_penalty()) {
   const auto& costing_options = costing.options();
 
   // Get the base costs
@@ -362,12 +410,14 @@ MotorScooterCost::MotorScooterCost(const Costing& costing)
     grade_penalty_[i] = avoid_hills * kAvoidHillsStrength[i];
   }
 
-  // Set the road classification factor based on use_primary option - scales from
-  // 0 (avoid primary roads) to 1 (don't avoid primary roads). Above 0.5 start to
-  // reduce the weight difference between road classes while factors below 0.5
-  // start to increase the differences.
-  float use_primary = costing_options.use_primary();
-  road_factor_ = (use_primary >= 0.5f) ? 1.5f - use_primary : 3.0f - use_primary * 5.0f;
+  // Set the road classification factors from the use_* options.
+  //
+  // motor_scooter used to expose use_primary alone and apply the scalar it derived to every
+  // class, so "prefer minor roads" could not be expressed at all. Each class now has its own
+  // preference, and any class the request leaves out falls back to use_primary, which keeps an
+  // existing use_primary-only request identical.
+  ComputeRoadClassFactors(costing_options, kRoadClassFactor,
+                          RoadClassPreferenceMode::kInheritUsePrimary, road_class_factor_);
 }
 
 // Check if access is allowed on the specified edge.
@@ -450,7 +500,7 @@ Cost MotorScooterCost::EdgeCost(const baldr::DirectedEdge* edge,
   }
 
   float factor = 1.0f + (kDensityFactor[edge->density()] - 0.85f) +
-                 (road_factor_ * kRoadClassFactor[static_cast<uint32_t>(edge->classification())]) +
+                 road_class_factor_[static_cast<uint32_t>(edge->classification())] +
                  grade_penalty_[static_cast<uint32_t>(edge->weighted_grade())] +
                  SpeedPenalty(edge, tile, time_info, flow_sources, speed);
 
@@ -480,7 +530,7 @@ Cost MotorScooterCost::TransitionCost(
     const baldr::NodeInfo* node,
     const EdgeLabel& pred,
     const graph_tile_ptr& /*tile*/,
-    const std::function<baldr::LimitedGraphReader()>& /*reader_getter*/) const {
+    const std::function<baldr::LimitedGraphReader()>& reader_getter) const {
   // Get the transition cost for country crossing, ferry, gate, toll booth,
   // destination only, alley, maneuver penalty
   uint32_t idx = pred.opp_local_idx();
@@ -534,6 +584,21 @@ Cost MotorScooterCost::TransitionCost(
     }
     c.cost += seconds;
   }
+  AddLowClassCost(edge, low_class_penalty_, c);
+
+  // Both the multi-lane right turn check and the stop sign live on the edge we are leaving, which
+  // the forward search does not hand us, so reach for the graph reader once and use it for both.
+  // The stop sign is always worth the lookup: even without a penalty it costs the rider time, so
+  // the estimate needs it.
+  auto reader = reader_getter();
+  const auto ingress_tile = reader.GetGraphTile(pred.edgeid());
+  const auto* ingress_edge = ingress_tile ? ingress_tile->directededge(pred.edgeid()) : nullptr;
+  if (IsPenalizedMultiLaneRightTurn(avoid_multi_lane_right_turns_, turntype, ingress_tile,
+                                    ingress_edge)) {
+    // This is a generalized search cost only; do not alter ETA.
+    c.cost += kMultiLaneRightTurnPenalty;
+  }
+  AddSignalAndStopSignCost(node, ingress_edge, traffic_signal_penalty_, stop_sign_penalty_, c);
   return c;
 }
 
@@ -544,9 +609,9 @@ Cost MotorScooterCost::TransitionCost(
 Cost MotorScooterCost::TransitionCostReverse(
     const uint32_t idx,
     const baldr::NodeInfo* node,
-    const baldr::DirectedEdge* pred,
-    const baldr::DirectedEdge* edge,
-    const graph_tile_ptr& /*tile*/,
+    const baldr::DirectedEdge* ingress_edge,
+    const baldr::DirectedEdge* outgoing_edge,
+    const graph_tile_ptr& ingress_tile,
     const GraphId& /*pred_id*/,
     const std::function<baldr::LimitedGraphReader()>& /*reader_getter*/,
     const bool has_measured_speed,
@@ -558,25 +623,25 @@ Cost MotorScooterCost::TransitionCostReverse(
 
   // Get the transition cost for country crossing, ferry, gate, toll booth,
   // destination only, alley, maneuver penalty
-  Cost c = base_transition_cost(node, edge, pred, idx);
-  c.secs += OSRMCarTurnDuration(edge, node, pred->opp_local_idx());
+  Cost c = base_transition_cost(node, outgoing_edge, ingress_edge, idx);
+  c.secs += OSRMCarTurnDuration(outgoing_edge, node, ingress_edge->opp_local_idx());
 
-  const auto stopimpact = edge->stopimpact(idx);
-  const auto turntype = edge->turntype(idx);
+  const auto stopimpact = outgoing_edge->stopimpact(idx);
+  const auto turntype = outgoing_edge->turntype(idx);
   // Transition time = turncost * stopimpact * densityfactor
   if (stopimpact > 0 && !shortest_) {
     float turn_cost;
-    if (edge->edge_to_right(idx) && edge->edge_to_left(idx)) {
+    if (outgoing_edge->edge_to_right(idx) && outgoing_edge->edge_to_left(idx)) {
       turn_cost = kTCCrossing;
     } else {
       turn_cost = (node->drive_on_right()) ? kRightSideTurnCosts[static_cast<uint32_t>(turntype)]
                                            : kLeftSideTurnCosts[static_cast<uint32_t>(turntype)];
     }
 
-    if ((edge->use() != Use::kRamp && pred->use() == Use::kRamp) ||
-        (edge->use() == Use::kRamp && pred->use() != Use::kRamp)) {
+    if ((outgoing_edge->use() != Use::kRamp && ingress_edge->use() == Use::kRamp) ||
+        (outgoing_edge->use() == Use::kRamp && ingress_edge->use() != Use::kRamp)) {
       turn_cost += kTCRamp;
-      if (edge->roundabout())
+      if (outgoing_edge->roundabout())
         turn_cost += kTCRoundabout;
     }
 
@@ -594,8 +659,8 @@ Cost MotorScooterCost::TransitionCostReverse(
       seconds *= stopimpact;
     }
 
-    AddUturnPenalty(idx, node, edge, has_reverse, has_left, has_right, false, InternalTurn::kNoTurn,
-                    seconds);
+    AddUturnPenalty(idx, node, outgoing_edge, has_reverse, has_left, has_right, false,
+                    InternalTurn::kNoTurn, seconds);
 
     // Apply density factor and stop impact penalty if there isn't traffic on this edge or you're not
     // using traffic
@@ -606,6 +671,13 @@ Cost MotorScooterCost::TransitionCostReverse(
     }
     c.cost += seconds;
   }
+  if (IsPenalizedMultiLaneRightTurn(avoid_multi_lane_right_turns_, turntype, ingress_tile,
+                                    ingress_edge)) {
+    // This is a generalized search cost only; do not alter ETA.
+    c.cost += kMultiLaneRightTurnPenalty;
+  }
+  AddLowClassCost(outgoing_edge, low_class_penalty_, c);
+  AddSignalAndStopSignCost(node, ingress_edge, traffic_signal_penalty_, stop_sign_penalty_, c);
   return c;
 }
 
@@ -624,6 +696,34 @@ void ParseMotorScooterCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kTopSpeedRange, json, "/top_speed", top_speed, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseHillsRange, json, "/use_hills", use_hills, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUsePrimaryRange, json, "/use_primary", use_primary, warnings);
+
+  // Only set a road class preference the request actually named. JSON_PBF_RANGED_DEFAULT
+  // always calls the setter, which would leave every presence bit set and make an
+  // omitted class indistinguishable from an explicit one - and the two are treated
+  // differently below, so that distinction has to survive parsing.
+  const auto parse_class = [&](const char* key, void (Costing::Options::*setter)(float)) {
+    if (auto value = rapidjson::get_optional<float>(json, key)) {
+      bool clamped = false;
+      (co->*setter)(kUsePrimaryRange(*value, clamped));
+      if (clamped) {
+        auto warning = warnings.Add();
+        warning->set_description("'" + std::string(key) + "' has been clamped.");
+        warning->set_code(400);
+      }
+    }
+  };
+  parse_class("/use_secondary", &Costing::Options::set_use_secondary);
+  parse_class("/use_tertiary", &Costing::Options::set_use_tertiary);
+  parse_class("/use_unclassified", &Costing::Options::set_use_unclassified);
+  parse_class("/use_residential", &Costing::Options::set_use_residential);
+  parse_class("/use_service", &Costing::Options::set_use_service);
+  JSON_PBF_DEFAULT_V2(co, false, json, "/avoid_multi_lane_right_turns", avoid_multi_lane_right_turns);
+  JSON_PBF_RANGED_DEFAULT(co, kTrafficSignalPenaltyRange, json, "/traffic_signal_penalty",
+                          traffic_signal_penalty, warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kStopSignPenaltyRange, json, "/stop_sign_penalty", stop_sign_penalty,
+                          warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kLowClassPenaltyRange, json, "/low_class_penalty", low_class_penalty,
+                          warnings);
 }
 
 cost_ptr_t CreateMotorScooterCost(const Costing& costing_options) {
@@ -644,17 +744,21 @@ namespace {
 
 class TestMotorScooterCost : public MotorScooterCost {
 public:
-  TestMotorScooterCost(const Costing& costing_options) : MotorScooterCost(costing_options){};
+  TestMotorScooterCost(const Costing& costing_options) : MotorScooterCost(costing_options) {};
 
   using MotorScooterCost::alley_penalty_;
   using MotorScooterCost::country_crossing_cost_;
   using MotorScooterCost::destination_only_penalty_;
   using MotorScooterCost::ferry_transition_cost_;
   using MotorScooterCost::gate_cost_;
+  using MotorScooterCost::low_class_penalty_;
   using MotorScooterCost::maneuver_penalty_;
+  using MotorScooterCost::road_class_factor_;
   using MotorScooterCost::service_factor_;
   using MotorScooterCost::service_penalty_;
+  using MotorScooterCost::stop_sign_penalty_;
   using MotorScooterCost::top_speed_;
+  using MotorScooterCost::traffic_signal_penalty_;
 };
 
 TestMotorScooterCost* make_motorscootercost_from_json(const std::string& property, float testVal) {
@@ -677,6 +781,163 @@ template <typename T>
 std::uniform_int_distribution<T>* make_int_distributor_from_range(const ranged_default_t<T>& range) {
   T rangeLength = range.max - range.min;
   return new std::uniform_int_distribution<T>(range.min - rangeLength, range.max + rangeLength);
+}
+
+TEST(MotorscooterCost, testTrafficSignalPenaltyDefaultsToZero) {
+  Api request;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, request);
+  TestMotorScooterCost cost(request.options().costings().find(Costing::motor_scooter)->second);
+
+  // Signals are everywhere, so the default must not change existing routes.
+  EXPECT_EQ(cost.traffic_signal_penalty_, kDefaultTrafficSignalPenalty);
+  EXPECT_EQ(cost.stop_sign_penalty_, kDefaultStopSignPenalty);
+}
+
+TEST(MotorscooterCost, testTrafficSignalPenaltyIsParsed) {
+  Api request;
+  ParseApi(
+      R"({"costing":"motor_scooter","costing_options":{"motor_scooter":{"traffic_signal_penalty":45.5,"stop_sign_penalty":12.25}}})",
+      valhalla::Options::route, request);
+  TestMotorScooterCost cost(request.options().costings().find(Costing::motor_scooter)->second);
+
+  EXPECT_FLOAT_EQ(cost.traffic_signal_penalty_, 45.5f);
+  EXPECT_FLOAT_EQ(cost.stop_sign_penalty_, 12.25f);
+}
+
+namespace {
+// The weighting motor_scooter applied before per-class preferences existed: one scalar
+// from use_primary multiplied into every class weight.
+float LegacyRoadClassFactor(float use_primary, size_t road_class) {
+  const float scale = (use_primary >= 0.5f) ? 1.5f - use_primary : 3.0f - use_primary * 5.0f;
+  return scale * kRoadClassFactor[road_class];
+}
+
+TestMotorScooterCost* make_cost(const std::string& costing_options_json) {
+  Api request;
+  ParseApi(R"({"costing":"motor_scooter","costing_options":{"motor_scooter":)" +
+               costing_options_json + "}}",
+           valhalla::Options::route, request);
+  return new TestMotorScooterCost(request.options().costings().find(Costing::motor_scooter)->second);
+}
+} // namespace
+
+TEST(MotorscooterCost, testUsePrimaryAloneKeepsLegacyWeights) {
+  // The property that matters most: a request naming only use_primary must weight every
+  // class exactly as it did before the per-class options existed. 0.2 is included because
+  // it drives the classes whose weight is 0.0 or 0.05, where an avoid floor would show up.
+  for (float use_primary : {0.0f, 0.2f, 0.5f, 0.9f, 1.0f}) {
+    std::shared_ptr<TestMotorScooterCost> cost(
+        make_cost(R"({"use_primary":)" + std::to_string(use_primary) + "}"));
+    for (size_t i = 0; i < std::size(kRoadClassFactor); ++i) {
+      EXPECT_FLOAT_EQ(cost->road_class_factor_[i], LegacyRoadClassFactor(use_primary, i))
+          << "use_primary=" << use_primary << " class=" << i;
+    }
+  }
+}
+
+TEST(MotorscooterCost, testDefaultRequestKeepsLegacyWeights) {
+  Api request;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, request);
+  TestMotorScooterCost cost(request.options().costings().find(Costing::motor_scooter)->second);
+
+  for (size_t i = 0; i < std::size(kRoadClassFactor); ++i) {
+    EXPECT_FLOAT_EQ(cost.road_class_factor_[i], LegacyRoadClassFactor(kDefaultUsePrimary, i));
+  }
+}
+
+TEST(MotorscooterCost, testNamingOneClassLeavesTheOthersOnUsePrimary) {
+  std::shared_ptr<TestMotorScooterCost> cost(
+      make_cost(R"({"use_primary":0.2,"use_residential":1.0})"));
+
+  const auto residential = static_cast<size_t>(baldr::RoadClass::kResidential);
+  for (size_t i = 0; i < std::size(kRoadClassFactor); ++i) {
+    if (i == residential) {
+      continue;
+    }
+    EXPECT_FLOAT_EQ(cost->road_class_factor_[i], LegacyRoadClassFactor(0.2f, i)) << "class=" << i;
+  }
+  // Residential is weighted 0.0, so preferring it cannot move the weight off zero.
+  EXPECT_FLOAT_EQ(cost->road_class_factor_[residential], 0.0f);
+}
+
+TEST(MotorscooterCost, testAvoidingAZeroWeightedClassIsExpressible) {
+  const auto residential = static_cast<size_t>(baldr::RoadClass::kResidential);
+
+  std::shared_ptr<TestMotorScooterCost> neutral(make_cost(R"({"use_residential":0.5})"));
+  EXPECT_FLOAT_EQ(neutral->road_class_factor_[residential], 0.0f)
+      << "0.5 is the neutral point and must not raise the floor";
+
+  std::shared_ptr<TestMotorScooterCost> avoiding(make_cost(R"({"use_residential":0.0})"));
+  EXPECT_GT(avoiding->road_class_factor_[residential], 0.0f);
+}
+
+TEST(MotorscooterCost, testAvoidFloorRampsInWithoutAStep) {
+  // Sweeping the preference across 0.5 must not jump: the floor ramps in from nothing.
+  const auto residential = static_cast<size_t>(baldr::RoadClass::kResidential);
+  std::shared_ptr<TestMotorScooterCost> just_above(make_cost(R"({"use_residential":0.51})"));
+  std::shared_ptr<TestMotorScooterCost> just_below(make_cost(R"({"use_residential":0.49})"));
+
+  const float step = std::abs(just_below->road_class_factor_[residential] -
+                              just_above->road_class_factor_[residential]);
+  EXPECT_LT(step, 0.01f) << "crossing 0.5 must be continuous";
+}
+
+TEST(MotorscooterCost, testWaitTimeStaysOutOfTheSearchCost) {
+  // The wait belongs in the estimate only. Charging it to the search cost as well would
+  // steer every route away from signals, changing routes for riders who never asked to
+  // avoid them - which is exactly what a contract run caught.
+  Api request;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, request);
+  TestMotorScooterCost cost(request.options().costings().find(Costing::motor_scooter)->second);
+
+  EXPECT_EQ(cost.traffic_signal_penalty_, 0.0f);
+  EXPECT_EQ(cost.stop_sign_penalty_, 0.0f);
+  // With both penalties at their default, nothing the delays do may reach the search cost.
+  // The delays themselves are asserted separately; this pins the split.
+}
+
+TEST(MotorscooterCost, testSignalAndStopDelaysAreNotOptions) {
+  // The wait at a red light is not something a request opts into: it is time the rider
+  // spends whatever the routing preferences say. Guard the magnitudes so a later change
+  // has to be deliberate.
+  EXPECT_GT(kTrafficSignalDelay, 0.0f);
+  EXPECT_GT(kStopSignDelay, 0.0f);
+  EXPECT_GT(kTrafficSignalDelay, kStopSignDelay)
+      << "waiting for a light takes longer than pulling away from a stop sign";
+  EXPECT_LE(kTrafficSignalDelay, 30.0f) << "a full cycle would over-estimate every crossing";
+}
+
+TEST(MotorscooterCost, testLowClassPenaltyDefaultsToZeroAndParses) {
+  Api defaults;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, defaults);
+  TestMotorScooterCost unset(defaults.options().costings().find(Costing::motor_scooter)->second);
+  EXPECT_EQ(unset.low_class_penalty_, kDefaultLowClassPenalty);
+
+  std::shared_ptr<TestMotorScooterCost> set(make_cost(R"({"low_class_penalty":45})"));
+  EXPECT_FLOAT_EQ(set->low_class_penalty_, 45.0f);
+}
+
+TEST(MotorscooterCost, testMultiLaneRightTurnOption) {
+  Api disabled_request;
+  ParseApi(R"({"costing":"motor_scooter"})", valhalla::Options::route, disabled_request);
+  TestMotorScooterCost disabled(
+      disabled_request.options().costings().find(Costing::motor_scooter)->second);
+  EXPECT_FALSE(disabled.avoid_multi_lane_right_turns_);
+
+  Api enabled_request;
+  ParseApi(
+      R"({"costing":"motor_scooter","costing_options":{"motor_scooter":{"avoid_multi_lane_right_turns":true}}})",
+      valhalla::Options::route, enabled_request);
+  TestMotorScooterCost enabled(
+      enabled_request.options().costings().find(Costing::motor_scooter)->second);
+  EXPECT_TRUE(enabled.avoid_multi_lane_right_turns_);
+
+  EXPECT_TRUE(IsRightTurn(Turn::Type::kRight));
+  EXPECT_TRUE(IsRightTurn(Turn::Type::kSharpRight));
+  EXPECT_FALSE(IsRightTurn(Turn::Type::kStraight));
+  EXPECT_FALSE(IsRightTurn(Turn::Type::kLeft));
+  EXPECT_FALSE(IsRightTurn(Turn::Type::kSharpLeft));
+  EXPECT_FALSE(IsRightTurn(Turn::Type::kReverse));
 }
 
 TEST(MotorscooterCost, testMotorScooterCostParams) {
@@ -764,6 +1025,24 @@ TEST(MotorscooterCost, testMotorScooterCostParams) {
   for (unsigned i = 0; i < testIterations; ++i) {
     ctorTester.reset(make_motorscootercost_from_json("top_speed", (*iDistributor)(generator)));
     EXPECT_THAT(ctorTester->top_speed_, test::IsBetween(kTopSpeedRange.min, kTopSpeedRange.max));
+  }
+
+  // traffic_signal_penalty_
+  fDistributor.reset(make_real_distributor_from_range(kTrafficSignalPenaltyRange));
+  for (unsigned i = 0; i < testIterations; ++i) {
+    ctorTester.reset(
+        make_motorscootercost_from_json("traffic_signal_penalty", (*fDistributor)(generator)));
+    EXPECT_THAT(ctorTester->traffic_signal_penalty_,
+                test::IsBetween(kTrafficSignalPenaltyRange.min, kTrafficSignalPenaltyRange.max));
+  }
+
+  // stop_sign_penalty_
+  fDistributor.reset(make_real_distributor_from_range(kStopSignPenaltyRange));
+  for (unsigned i = 0; i < testIterations; ++i) {
+    ctorTester.reset(
+        make_motorscootercost_from_json("stop_sign_penalty", (*fDistributor)(generator)));
+    EXPECT_THAT(ctorTester->stop_sign_penalty_,
+                test::IsBetween(kStopSignPenaltyRange.min, kStopSignPenaltyRange.max));
   }
 
   // service_penalty_

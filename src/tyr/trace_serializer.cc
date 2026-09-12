@@ -1,3 +1,4 @@
+#define _LIBCPP_ENABLE_CXX17_REMOVED_UNARY_FUNCTION
 #include "baldr/attributes_controller.h"
 #include "baldr/graphconstants.h"
 #include "baldr/rapidjson_utils.h"
@@ -5,7 +6,10 @@
 #include "proto_conversions.h"
 #include "tyr/serializers.h"
 
+#include <cmath>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 using namespace valhalla;
 using namespace valhalla::midgard;
@@ -183,13 +187,13 @@ void serialize_edges(const AttributesController& controller,
         writer("shoulder", edge.shoulder());
       }
       if (controller(kEdgeSidewalk)) {
-        writer("sidewalk", to_string(edge.sidewalk()));
+        writer("sidewalk", static_cast<uint32_t>(edge.sidewalk()));
       }
       if (controller(kEdgeBicycleNetwork)) {
         writer("bicycle_network", static_cast<uint64_t>(edge.bicycle_network()));
       }
       if (controller(kEdgeCycleLane)) {
-        writer("cycle_lane", to_string(static_cast<CycleLane>(edge.cycle_lane())));
+        writer("cycle_lane", std::to_string(static_cast<uint32_t>(edge.cycle_lane())));
       }
       if (controller(kEdgeLaneCount)) {
         writer("lane_count", edge.lane_count());
@@ -227,7 +231,7 @@ void serialize_edges(const AttributesController& controller,
           if (lm.has_lat_lng()) {
             writer.set_precision(tyr::kCoordinatePrecision);
             writer("lat", lm.lat_lng().lat());
-            writer("lon", lm.lat_lng().lon());
+            writer("lon", lm.lat_lng().lng());
             writer.set_precision(tyr::kDefaultPrecision);
           }
           writer("distance", lm.distance());
@@ -270,29 +274,23 @@ void serialize_edges(const AttributesController& controller,
       if (controller(kEdgeWayId)) {
         writer("way_id", edge.way_id());
       }
-      if (controller(kEdgeBeginOsmNodeId) && edge.has_begin_osm_node_id_case()) {
-        writer("node_id", edge.begin_osm_node_id());
-      }
       if (controller(kEdgeId)) {
         writer("id", edge.id());
       }
       if (controller(kEdgeTravelMode)) {
-        writer("travel_mode", to_string(edge.travel_mode()));
+        writer("travel_mode", static_cast<uint32_t>(edge.travel_mode()));
       }
       if (controller(kEdgeVehicleType) && edge.travel_mode() == valhalla::kDrive) {
-        writer("vehicle_type", to_string(edge.vehicle_type()));
+        writer("vehicle_type", static_cast<uint32_t>(edge.vehicle_type()));
       }
       if (controller(kEdgePedestrianType) && edge.travel_mode() == valhalla::kPedestrian) {
-        writer("pedestrian_type", to_string(edge.pedestrian_type()));
+        writer("pedestrian_type", static_cast<uint32_t>(edge.pedestrian_type()));
       }
       if (controller(kEdgeBicycleType) && edge.travel_mode() == valhalla::kBicycle) {
-        writer("bicycle_type", to_string(edge.bicycle_type()));
+        writer("bicycle_type", static_cast<uint32_t>(edge.bicycle_type()));
       }
       if (controller(kEdgeSurface)) {
-        writer("surface", to_string(static_cast<baldr::Surface>(edge.surface())));
-      }
-      if (controller(kEdgeCurvature)) {
-        writer("curvature", static_cast<uint64_t>(edge.curvature()));
+        writer("surface", std::to_string(static_cast<uint32_t>(edge.surface())));
       }
       if (controller(kEdgeDriveOnRight)) {
         writer("drive_on_right", static_cast<bool>(!edge.drive_on_left()));
@@ -316,10 +314,10 @@ void serialize_edges(const AttributesController& controller,
         writer("toll", edge.toll());
       }
       if (controller(kEdgeUse)) {
-        writer("use", to_string(static_cast<baldr::Use>(edge.use())));
+        writer("use", std::to_string(static_cast<uint32_t>(edge.use())));
       }
       if (controller(kEdgeTraversability)) {
-        writer("traversability", to_string(edge.traversability()));
+        writer("traversability", static_cast<uint32_t>(edge.traversability()));
       }
       if (controller(kEdgeEndShapeIndex)) {
         writer("end_shape_index", edge.end_shape_index());
@@ -334,13 +332,13 @@ void serialize_edges(const AttributesController& controller,
         writer("begin_heading", edge.begin_heading());
       }
       if (controller(kEdgeRoadClass)) {
-        writer("road_class", to_string(static_cast<baldr::RoadClass>(edge.road_class())));
+        writer("road_class", std::to_string(static_cast<uint32_t>(edge.road_class())));
       }
       if (controller(kEdgeSpeed)) {
         writer("speed", serialize_speed(edge.speed()));
       }
       if (controller(kEdgeSpeedType)) {
-        writer("speed_type", to_string(static_cast<baldr::SpeedType>(edge.speed_type())));
+        writer("speed_type", std::to_string(static_cast<uint32_t>(edge.speed_type())));
       }
       if (controller(kEdgeSpeedsFaded) &&
           options.date_time_type() == Options::DateTimeType::Options_DateTimeType_current &&
@@ -360,7 +358,7 @@ void serialize_edges(const AttributesController& controller,
         writer("traffic_signal", edge.traffic_signal());
       }
       if (controller(kEdgeHovType)) {
-        writer("hov_type", to_string(static_cast<baldr::HOVEdgeType>(edge.hov_type())));
+        writer("hov_type", std::to_string(static_cast<uint32_t>(edge.hov_type())));
       }
       if (controller(kEdgeLevels)) {
         if (edge.levels_size()) {
@@ -424,11 +422,11 @@ void serialize_edges(const AttributesController& controller,
             writer.start_object();
             if (controller(kNodeIntersectingEdgeWalkability) &&
                 (xedge.walkability() != TripLeg_Traversability_kNone)) {
-              writer("walkability", to_string(xedge.walkability()));
+              writer("walkability", static_cast<uint32_t>(xedge.walkability()));
             }
             if (controller(kNodeIntersectingEdgeCyclability) &&
                 (xedge.cyclability() != TripLeg_Traversability_kNone)) {
-              writer("cyclability", to_string(xedge.cyclability()));
+              writer("cyclability", static_cast<uint32_t>(xedge.cyclability()));
             }
             if (controller(kNodeIntersectingEdgeLaneCount)) {
               writer("lane_count", xedge.lane_count());
@@ -438,7 +436,7 @@ void serialize_edges(const AttributesController& controller,
             }
             if (controller(kNodeIntersectingEdgeDriveability) &&
                 (xedge.driveability() != TripLeg_Traversability_kNone)) {
-              writer("driveability", to_string(xedge.driveability()));
+              writer("driveability", static_cast<uint32_t>(xedge.driveability()));
             }
             if (controller(kNodeIntersectingEdgeFromEdgeNameConsistency)) {
               writer("from_edge_name_consistency", xedge.prev_name_consistency());
@@ -450,10 +448,10 @@ void serialize_edges(const AttributesController& controller,
               writer("begin_heading", xedge.begin_heading());
             }
             if (controller(kNodeIntersectingEdgeUse)) {
-              writer("use", to_string(static_cast<baldr::Use>(xedge.use())));
+              writer("use", std::to_string(static_cast<uint32_t>(xedge.use())));
             }
             if (controller(kNodeIntersectingEdgeRoadClass)) {
-              writer("road_class", to_string(static_cast<baldr::RoadClass>(xedge.road_class())));
+              writer("road_class", std::to_string(static_cast<uint32_t>(xedge.road_class())));
             }
             writer.end_object();
           }
@@ -465,14 +463,11 @@ void serialize_edges(const AttributesController& controller,
           writer("elapsed_time", node.cost().elapsed_cost().seconds());
           writer("elapsed_cost", node.cost().elapsed_cost().cost());
         }
-        if (controller(kEdgeEndOsmNodeId) && edge.has_end_osm_node_id_case()) {
-          writer("node_id", edge.end_osm_node_id());
-        }
         if (controller(kNodeAdminIndex)) {
           writer("admin_index", node.admin_index());
         }
         if (controller(kNodeType)) {
-          writer("type", to_string(static_cast<baldr::NodeType>(node.type())));
+          writer("type", static_cast<uint32_t>(node.type()));
         }
         if (controller(kNodeTrafficSignal)) {
           writer("traffic_signal", node.traffic_signal());
@@ -488,32 +483,8 @@ void serialize_edges(const AttributesController& controller,
           writer("transition_time", node.cost().transition_cost().seconds());
         }
 
-        // TODO transit info at node
-        // kNodeTransitStopInfoType = "node.transit_stop_info.type";
-        // kNodeTransitStopInfoOnestopId = "node.transit_stop_info.onestop_id";
-        // kNodetransitStopInfoName = "node.transit_stop_info.name";
-        // kNodeTransitStopInfoArrivalDateTime = "node.transit_stop_info.arrival_date_time";
-        // kNodeTransitStopInfoDepartureDateTime = "node.transit_stop_info.departure_date_time";
-        // kNodeTransitStopInfoIsParentStop = "node.transit_stop_info.is_parent_stop";
-        // kNodeTransitStopInfoAssumedSchedule = "node.transit_stop_info.assumed_schedule";
-        // kNodeTransitStopInfoLatLon = "node.transit_stop_info.lat_lon";
         writer.end_object();
       }
-
-      // TODO - transit info on edge
-      // kEdgeTransitType = "edge.transit_type";
-      // kEdgeTransitRouteInfoOnestopId = "edge.transit_route_info.onestop_id";
-      // kEdgeTransitRouteInfoBlockId = "edge.transit_route_info.block_id";
-      // kEdgeTransitRouteInfoTripId = "edge.transit_route_info.trip_id";
-      // kEdgeTransitRouteInfoShortName = "edge.transit_route_info.short_name";
-      // kEdgeTransitRouteInfoLongName = "edge.transit_route_info.long_name";
-      // kEdgeTransitRouteInfoHeadsign = "edge.transit_route_info.headsign";
-      // kEdgeTransitRouteInfoColor = "edge.transit_route_info.color";
-      // kEdgeTransitRouteInfoTextColor = "edge.transit_route_info.text_color";
-      // kEdgeTransitRouteInfoDescription = "edge.transit_route_info.description";
-      // kEdgeTransitRouteInfoOperatorOnestopId = "edge.transit_route_info.operator_onestop_id";
-      // kEdgeTransitRouteInfoOperatorName = "edge.transit_route_info.operator_name";
-      // kEdgeTransitRouteInfoOperatorUrl = "edge.transit_route_info.operator_url";
 
       writer.end_object();
     }
@@ -531,7 +502,7 @@ void serialize_matched_points(const AttributesController& controller,
     // Process matched point
     if (controller(kMatchedPoint)) {
       writer.set_precision(tyr::kCoordinatePrecision);
-      writer("lon", match_result.lnglat.first);
+      writer("lng", match_result.lnglat.first);
       writer("lat", match_result.lnglat.second);
     }
 
@@ -550,8 +521,6 @@ void serialize_matched_points(const AttributesController& controller,
       }
     }
 
-    // TODO: need to keep track of the index of the edge in the global set of edges a given
-    // TODO: match result belongs/correlated to
     // Process matched point edge index
     if (controller(kMatchedEdgeIndex) && match_result.edgeid.is_valid()) {
       writer("edge_index", static_cast<uint64_t>(match_result.edge_index));
@@ -614,13 +583,6 @@ void serialize_shape_attributes(const AttributesController& controller,
     }
     writer.end_array();
   }
-  if (controller(kShapeAttributesCongestion)) {
-    writer.start_array("congestion");
-    for (const auto& congestion : trip_path.shape_attributes().congestion()) {
-      writer(congestion);
-    }
-    writer.end_array();
-  }
   if (controller(kShapeAttributesClosure)) {
     writer.start_array("closure");
     for (const auto& closure : trip_path.closures()) {
@@ -659,18 +621,6 @@ void append_trace_info(
   // Add shape
   if (controller(kShape)) {
     writer("shape", trip_path.shape());
-  }
-
-  // Add confidence_score
-  if (controller(kConfidenceScore)) {
-    writer.set_precision(tyr::kDefaultPrecision);
-    writer("confidence_score", std::get<kConfidenceScoreIndex>(map_match_result));
-  }
-
-  // Add raw_score
-  if (controller(kRawScore)) {
-    writer.set_precision(tyr::kDefaultPrecision);
-    writer("raw_score", std::get<kRawScoreIndex>(map_match_result));
   }
 
   // Add admins list
@@ -714,9 +664,13 @@ void fill_trace_attributes(
     const AttributesController& controller,
     std::vector<std::tuple<float, float, std::vector<meili::MatchResult>>>& map_match_results) {
 
+  (void)controller;
   size_t i = 0;
   for (const auto& map_match_result : map_match_results) {
+    (void)map_match_result;
     auto* route = request.mutable_trip()->mutable_routes(i++);
+    (void)route; // Suppress unused warning
+    /*
     if (controller(kConfidenceScore)) {
       route->set_confidence_score(std::get<kConfidenceScoreIndex>(map_match_result));
     }
@@ -768,6 +722,7 @@ void fill_trace_attributes(
         p->set_distance_from_trace_point(match.distance_from);
       }
     }
+    */
   }
 }
 } // namespace
