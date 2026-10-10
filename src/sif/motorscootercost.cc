@@ -69,6 +69,14 @@ constexpr float kLeftSideTurnCosts[] = {kTCStraight,         kTCSlight,  kTCUnfa
 // Valid ranges and defaults
 constexpr ranged_default_t<float> kUseHillsRange{0, kDefaultUseHills, 1.0f};
 constexpr ranged_default_t<float> kUsePrimaryRange{0, kDefaultUsePrimary, 1.0f};
+
+// How much avoiding a road class is worth, as a multiple of the class weight. Zero keeps the
+// original weighting, where the use_* preferences only nudge a weight that is already small next
+// to the time a scooter spends on the road. A positive value switches to the avoid-only weighting
+// motorcycle uses, so a rider who asks for the back streets by avoiding the arterials gets a
+// route that actually changes. The upper bound is well past the motorcycle strength.
+constexpr float kDefaultRoadClassStrength = 0.0f;
+constexpr ranged_default_t<float> kRoadClassStrengthRange{0.0f, kDefaultRoadClassStrength, 32.0f};
 constexpr ranged_default_t<uint32_t> kTopSpeedRange{kMinimumTopSpeed, kDefaultTopSpeed,
                                                     kMaximumTopSpeed};
 
@@ -416,8 +424,19 @@ MotorScooterCost::MotorScooterCost(const Costing& costing)
   // class, so "prefer minor roads" could not be expressed at all. Each class now has its own
   // preference, and any class the request leaves out falls back to use_primary, which keeps an
   // existing use_primary-only request identical.
-  ComputeRoadClassFactors(costing_options, kRoadClassFactor,
-                          RoadClassPreferenceMode::kInheritUsePrimary, road_class_factor_);
+  //
+  // Those weights stay small next to the time spent on the road, so on their own the preferences
+  // barely move a route. A request that sets road_class_strength opts into the avoid-only
+  // weighting instead, where avoiding a class costs that multiple of its weight.
+  const float road_class_strength =
+      costing_options.has_road_class_strength() ? costing_options.road_class_strength() : 0.0f;
+  if (road_class_strength > 0.0f) {
+    ComputeRoadClassFactors(costing_options, kRoadClassFactor, RoadClassPreferenceMode::kAvoidOnly,
+                            road_class_factor_, road_class_strength);
+  } else {
+    ComputeRoadClassFactors(costing_options, kRoadClassFactor,
+                            RoadClassPreferenceMode::kInheritUsePrimary, road_class_factor_);
+  }
 }
 
 // Check if access is allowed on the specified edge.
@@ -717,6 +736,16 @@ void ParseMotorScooterCostOptions(const rapidjson::Document& doc,
   parse_class("/use_unclassified", &Costing::Options::set_use_unclassified);
   parse_class("/use_residential", &Costing::Options::set_use_residential);
   parse_class("/use_service", &Costing::Options::set_use_service);
+  // Only set when named, so an omitted strength keeps the original weighting.
+  if (auto value = rapidjson::get_optional<float>(json, "/road_class_strength")) {
+    bool clamped = false;
+    co->set_road_class_strength(kRoadClassStrengthRange(*value, clamped));
+    if (clamped) {
+      auto warning = warnings.Add();
+      warning->set_description("'/road_class_strength' has been clamped.");
+      warning->set_code(400);
+    }
+  }
   JSON_PBF_DEFAULT_V2(co, false, json, "/avoid_multi_lane_right_turns", avoid_multi_lane_right_turns);
   JSON_PBF_RANGED_DEFAULT(co, kTrafficSignalPenaltyRange, json, "/traffic_signal_penalty",
                           traffic_signal_penalty, warnings);
@@ -880,6 +909,37 @@ TEST(MotorscooterCost, testAvoidFloorRampsInWithoutAStep) {
   const float step = std::abs(just_below->road_class_factor_[residential] -
                               just_above->road_class_factor_[residential]);
   EXPECT_LT(step, 0.01f) << "crossing 0.5 must be continuous";
+}
+
+TEST(MotorscooterCost, testRoadClassStrengthUnsetKeepsTheOriginalWeights) {
+  // Without road_class_strength nothing changes for existing requests.
+  std::shared_ptr<TestMotorScooterCost> cost(make_cost(R"({"use_primary":0.2})"));
+  for (size_t i = 0; i < std::size(kRoadClassFactor); ++i) {
+    EXPECT_FLOAT_EQ(cost->road_class_factor_[i], LegacyRoadClassFactor(0.2f, i)) << "class=" << i;
+  }
+}
+
+TEST(MotorscooterCost, testRoadClassStrengthChargesOnlyAvoidedClasses) {
+  // With a strength, a class the request is content with costs nothing, and an avoided class
+  // costs the strength times its weight times how far below 0.5 the preference sits.
+  std::shared_ptr<TestMotorScooterCost> cost(make_cost(
+      R"({"road_class_strength":8,"use_primary":0.5,"use_secondary":0.0,"use_residential":1.0})"));
+
+  const auto secondary = static_cast<size_t>(baldr::RoadClass::kSecondary);
+  const auto residential = static_cast<size_t>(baldr::RoadClass::kResidential);
+  const auto primary = static_cast<size_t>(baldr::RoadClass::kPrimary);
+  EXPECT_FLOAT_EQ(cost->road_class_factor_[secondary], 8.0f * kRoadClassFactor[secondary]);
+  EXPECT_FLOAT_EQ(cost->road_class_factor_[residential], 0.0f);
+  EXPECT_FLOAT_EQ(cost->road_class_factor_[primary], 0.0f);
+}
+
+TEST(MotorscooterCost, testRoadClassStrengthScalesTheCharge) {
+  const auto tertiary = static_cast<size_t>(baldr::RoadClass::kTertiary);
+  std::shared_ptr<TestMotorScooterCost> mild(
+      make_cost(R"({"road_class_strength":4,"use_tertiary":0.0})"));
+  std::shared_ptr<TestMotorScooterCost> strong(
+      make_cost(R"({"road_class_strength":16,"use_tertiary":0.0})"));
+  EXPECT_FLOAT_EQ(strong->road_class_factor_[tertiary], 4.0f * mild->road_class_factor_[tertiary]);
 }
 
 TEST(MotorscooterCost, testWaitTimeStaysOutOfTheSearchCost) {

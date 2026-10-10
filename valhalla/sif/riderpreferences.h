@@ -75,10 +75,14 @@ constexpr float kAvoidRoadClassStrength = 8.0f;
 // Returns true when the request named at least one road class preference. A caller whose
 // costing had no per class preference before can use that to leave the whole term switched
 // off and stay bit-for-bit identical to its old behaviour.
+//
+// avoid_strength replaces kAvoidRoadClassStrength under kAvoidOnly, so a costing can let the
+// request decide how much avoiding a class is worth. It has no effect under kInheritUsePrimary.
 inline bool ComputeRoadClassFactors(const Costing::Options& options,
                                     const float (&base_weights)[kRoadClassCount],
                                     RoadClassPreferenceMode mode,
-                                    float (&factors)[kRoadClassCount]) {
+                                    float (&factors)[kRoadClassCount],
+                                    float avoid_strength = kAvoidRoadClassStrength) {
   const float use_primary = options.use_primary();
   const bool inherits = mode == RoadClassPreferenceMode::kInheritUsePrimary;
   const bool named_primary = options.has_use_primary();
@@ -138,7 +142,7 @@ inline bool ComputeRoadClassFactors(const Costing::Options& options,
     } else {
       // Nothing is charged for a class the request is content with, so a request that asks to
       // avoid nothing pays nothing anywhere.
-      factors[i] = kAvoidRoadClassStrength * weight * avoidance;
+      factors[i] = avoid_strength * weight * avoidance;
     }
   }
 
