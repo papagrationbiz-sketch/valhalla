@@ -379,6 +379,9 @@ message Costing {
     oneof has_use_service {
       float use_service = 104;
     }
+    oneof has_road_class_strength {
+      float road_class_strength = 105;
+    }
   }
 
   oneof has_options {
